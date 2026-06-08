@@ -90,5 +90,5 @@ To evaluate AtomMem on the LoCoMo benchmark (requires raw samples in data/split_
 python scripts/evaluate_locomo.py
 ```
 
-This script builds independent memory banks per conversation and evaluates categories 1-4 by default. Detailed question-level predictions and aggregate metrics (F1, BLEU-1, Recall@10, J-Score), along with total token usage, are exported to runs/locomo_eval/.
+This script builds independent memory banks per conversation and evaluates categories 1-4 by default. Detailed question-level predictions and aggregate metrics (F1, BLEU-1, Recall@10, J-Score), along with total token usage, are exported to `runs/locomo_eval/`.
 
