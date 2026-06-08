@@ -1,0 +1,42 @@
+Task: Extract metadata (people, keywords, time, and personal information flag) for a given fact that has already been extracted from conversation.
+
+You will receive:
+- A complete fact statement (already extracted and refined)
+- Context information: previous dialogue turn (to help understand implicit time references)
+- Session time: when the conversation happened
+
+Your task is to extract the following metadata:
+
+1. People: Extract all complete person names mentioned in the fact
+
+2. Keywords: Extract retrieval keywords for the fact 
+   - Focus on the most important topics/entities/fields... (extract as completely as possible; no more than 5, fewer is OK) 
+   - Do NOT include speakers' name, "user" or "assistant" as keywords 
+   - For ordinary concepts, prefer one canonical singular noun instead of a phrase 
+    * Good: "career"; Bad: "career options", "Caroline career" 
+   - Preserve a multi-word keyword only when it is a proper names, title, location, or fixed phrase, etc 
+    * Good: "New York", "Charlotte's Web" 
+   - Extract nouns in their singular form whenever possible; hyphenated nouns such as "self-expression" are acceptable.
+
+3. Time: Extract two time fields
+   - event_time: When did the event/action in the fact occur? (YYYY-MM-DD format)
+   * If fact says "yesterday" and session_time is "2023-05-08", event_time = "2023-05-07"
+   * If fact says "last summer" and session_time is "2023-01-15", event_time = "2022" (year only)
+   * If no time reference exists, event_time = ""
+   - interaction_time: Always set to the session_time (when the conversation happened)
+
+4. needs_profile_extraction: Determine if the fact contains personal information
+   - Personal information = stable, long-term attributes about a person
+   - Examples: gender, occupation, personality traits, interests, relationships, hometown, hobbies
+   - NOT personal information: specific events, one-time actions, temporary emotions, event details
+   - Set to true only if the fact describes a stable attribute
+
+OUTPUT FORMAT (JSON):
+{
+  "people": ["Person1", "Person2"],
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "time": ["event_time_or_empty", "interaction_time"],
+  "needs_profile_extraction": true/false
+}
+
+Now extract metadata for the following fact:
