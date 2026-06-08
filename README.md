@@ -10,11 +10,22 @@
 * 🕸️ **Associative Graph Retrieval**: Utilizes a localized memory graph (Entities, Events, and Dialogue Turns) and applies Random Walk with Restart (RWR) to surface implicit contextual evidence.
 * ⚡ **Plug-and-Play Pipeline**: Easily ingest raw conversations or pre-extracted facts. Fully compatible with OpenAI-like API endpoints for fact extraction and downstream QA generation.
 
+<p align="center">
+  <img src="Figures/intro.png" alt="Architecture comparison" width="80%"><br>
+  <sub><b>Architecture comparison.</b> AtomMem overcomes the bloated storage and isolated matching of previous methods <br> by organizing atomic facts into associative graphs for precise hierarchical retrieval.</sub>
+</p>
+
 ---
+
 
 ## 🏗️ System Architecture
 
 At QA time, AtomMem retrieves a high-precision seed set, activates a localized fact graph, and propagates activation scores to identify the optimal context.
+
+<p align="center">
+  <img src="Figures/main-method.png" alt="AtomMem System Architecture" width="80%"><br>
+  <sub><b>The overall architecture of AtomMem.</b> It is designed to support high-density memory storage, stable user-state evolution, and efficient retrieval for long-term personalized agents.</sub>
+</p>
 
 ## 📂 Repository Layout
 
@@ -59,7 +70,7 @@ Edit `.env`:
 
 ```bash
 ATOMMEM_API_KEY=your_api_key_here
-ATOMMEM_API_BASE=[https://api.openai.com/v1](https://api.openai.com/v1)
+ATOMMEM_API_BASE=https://api.openai.com/v1
 ATOMMEM_LLM_MODEL=gpt-4o-mini
 ATOMMEM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 
