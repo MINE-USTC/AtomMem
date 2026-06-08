@@ -72,8 +72,12 @@ ATOMMEM_FACT_EXECUTOR_MODEL=your_fact_executor_model
 ## 📊 LoCoMo Benchmark Evaluation
 To evaluate AtomMem on the LoCoMo benchmark (requires raw samples in data/split_samples/ and pre-extracted facts in data/locomo_preextracted_facts/):
 
+* **Reproduce Paper Results:** Use the provided pre-extracted facts in `data/locomo_preextracted_facts/` alongside raw samples in `data/split_samples/` to directly reproduce our reported metrics.
+* **End-to-End Evaluation:** Run the full pipeline starting from raw dialogues. We provide `data/SFT_training_data.json` to help you fine-tune your own Fact Executor model for this purpose.
+
 ```bash
 python scripts/evaluate_locomo.py
 ```
 
 This script builds independent memory banks per conversation and evaluates categories 1-4 by default. Detailed question-level predictions and aggregate metrics (F1, BLEU-1, Recall@10, J-Score), along with total token usage, are exported to runs/locomo_eval/.
+
