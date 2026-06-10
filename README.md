@@ -1,14 +1,14 @@
-# 🧠 AtomMem: Agentic Memory for LLM Agents
+# 🧠 AtomMem: Building Simple and Effective Memory System for LLM Agents via Atomic Facts
 
-**AtomMem** is a long-term memory system designed for personalized LLM agents. It organizes continuous dialogue history around atomic facts, incrementally constructs event memories and temporal user profiles, and retrieves highly relevant evidence through a dynamic associative memory graph.
+**AtomMem** is a long-term memory system designed for personalized LLM agents. It leverages **atomic facts** as a highly efficient memory representation to distill continuous dialogue history into self-contained, information-dense units. Building upon this foundation, it incrementally constructs **event memories** to capture coherent episodic context and **temporal user profiles** to track dynamically evolving user attributes. At inference time, it retrieves highly relevant evidence through a dynamic **associative memory graph**. This holistic architecture ensures stable memory evolution, ultimately providing a scalable and economically viable solution for deploying intelligent personalized agents.
 
 ---
 
 ## ✨ Key Features
 
-* 🧩 **Tri-partite Memory Architecture**: Maintains three distinct memory views: standalone **Atomic Facts**, clustered **Event Memories**, and evolving **Temporal User Profiles**.
-* 🕸️ **Associative Graph Retrieval**: Utilizes a localized memory graph (Entities, Events, and Dialogue Turns) and applies Random Walk with Restart (RWR) to surface implicit contextual evidence.
-* ⚡ **Plug-and-Play Pipeline**: Easily ingest raw conversations or pre-extracted facts. Fully compatible with OpenAI-like API endpoints for fact extraction and downstream QA generation.
+* 🧩 **Tri-partite Memory Architecture**: Maintains three distinct memory views: self-contained, information-dense **Atomic Facts**, episodic **Event Memories**, and evolving **Temporal User Profiles**.
+* 🕸️ **Associative Graph Retrieval**: Utilizes a localized memory graph (Entities, Events, and Neighboring Dialogue Turns) and applies Random Walk with Restart (RWR) to surface implicit contextual evidence.
+* ⚡ **Plug-and-Play Pipeline**: Acts as a highly adaptable memory module and allows developers to effortlessly equip conversational agents with long-term memory capabilities to deliver personalized services.
 
 <p align="center">
   <img src="Figures/intro.png" alt="Architecture comparison" width="80%"><br>
@@ -20,7 +20,7 @@
 
 ## 🏗️ System Architecture
 
-At QA time, AtomMem retrieves a high-precision seed set, activates a localized fact graph, and propagates activation scores to identify the optimal context.
+During the memory construction phase, AtomMem distills continuous dialogue history into self-contained, information-dense atomic facts, which are then used to incrementally build coherent event memories and track temporal user profiles. At QA time, AtomMem retrieves a high-precision seed set, activates a localized memory graph connecting entities, events, and neighboring dialogue turns, and propagates activation scores via Personalized PageRank (PPR) to identify the optimal context.
 
 <p align="center">
   <img src="Figures/main-method.png" alt="AtomMem System Architecture" width="80%"><br>
@@ -31,11 +31,11 @@ At QA time, AtomMem retrieves a high-precision seed set, activates a localized f
 
 ```text
 .
-├── atommem_core/              # Public pipeline components
-├── data/                      # Raw samples and Fact Executor SFT data
+├── atommem_core/              # Pipeline components
+├── data/                      # Fact Extractor SFT training data and LoCoMo benchmark dataset
 ├── prompts/                   # LLM prompts used by memory construction and QA
 ├── scripts/                   # Execution and evaluation scripts
-├── src/                       # Core storage, retrieval, LLM, and embedding modules
+├── src/                       # Underlying modules for storage, retrieval, LLMs, and embeddings
 ├── config.py                  # Environment-driven settings
 ├── .env.example
 └── requirements.txt
