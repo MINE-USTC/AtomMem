@@ -96,6 +96,10 @@ This script builds independent memory banks per conversation and evaluates categ
 
 AtomMem provides an interactive local browser demo, enabling users to intuitively explore online personalized dialogue. 
 
+<p align="center">
+  <img src="./Figures/demo_figure.png" alt="Demo" width="80%">
+</p>
+
 ### Start the Server
 
 The demo utilizes two OpenAI-compatible API endpoints: 
