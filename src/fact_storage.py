@@ -1,7 +1,6 @@
 # src/fact_storage.py
-# Fact Storage and Processing Module (v2.0)
+# Fact storage and processing module.
 
-import os
 import time
 from typing import List, Dict, Any, Optional
 from src.llm_interface import LLMInterface
@@ -10,6 +9,11 @@ from src.profile_manager import ProfileManager
 from src.file_storage import FileStorage
 from src.utils import cosine_similarity, jaccard_similarity
 import config
+
+
+def people_sets_compatible(left_people: set, right_people: set) -> bool:
+    """Reject only when both people sets are non-empty and disjoint."""
+    return not left_people or not right_people or bool(left_people & right_people)
 
 
 class FactStorageManager:
@@ -142,14 +146,15 @@ class FactStorageManager:
         Returns:
             True if duplicate, False otherwise
         """
-        # Filter facts with same people
+        # Reject only when both people sets are non-empty and disjoint.
         candidates = []
         new_people = set(new_fact.get("people", []))
         
         for fact in existing_facts:
             fact_people = set(fact.get("people", []))
-            if new_people & fact_people:
-                candidates.append(fact)
+            if not people_sets_compatible(new_people, fact_people):
+                continue
+            candidates.append(fact)
         
         # Check embedding similarity
         for fact in candidates:
@@ -176,9 +181,9 @@ class FactStorageManager:
         new_time = new_fact.get("time", ["", ""])
         
         for fact in existing_facts:
-            # Filter by people
+            # Reject only when both people sets are non-empty and disjoint.
             fact_people = set(fact.get("people", []))
-            if not (new_people & fact_people):
+            if not people_sets_compatible(new_people, fact_people):
                 continue
             
             # Filter by time (optional, relaxed check)
@@ -266,18 +271,6 @@ Determine if there is a logical conflict.
             return next((f for f in candidates if f["fact_id"] == conflict_id), None)
         
         return None
-    
-    def process_fact(self, new_fact: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Alias for process_new_fact for backward compatibility.
-        
-        Args:
-            new_fact: New fact to process
-            
-        Returns:
-            Processing result dictionary
-        """
-        return self.process_new_fact(new_fact)
     
     def force_profile_extraction(self):
         """

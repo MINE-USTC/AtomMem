@@ -1,9 +1,8 @@
 # src/event_manager.py
-# Event Management Module (v2.0)
+# Event management module.
 
 import os
-from typing import List, Dict, Any, Optional
-import numpy as np
+from typing import List, Dict, Any
 from src.llm_interface import LLMInterface
 from src.embedding import EmbeddingModel
 from src.utils import generate_event_id, cosine_similarity, jaccard_similarity
@@ -198,12 +197,10 @@ Please analyze and determine if the new fact should be clustered with any of the
         # LLM generates summary and keywords
         event_info = self._llm_generate_event_info(all_facts)
         
-        # Aggregate people and keywords
+        # Aggregate people
         all_people = set()
-        all_keywords = set()
         for fact in all_facts:
             all_people.update(fact.get("people", []))
-            all_keywords.update(fact.get("keywords", []))
         
         # Extract time range
         all_times = []
@@ -252,11 +249,9 @@ Please analyze and determine if the new fact should be clustered with any of the
         event["keywords"] = event_info["keywords"]
         event["embedding"] = self.embedding_model.encode(event_info["summary"])
         
-        # Update aggregated people and keywords
+        # Update aggregated people
         all_people = set(event.get("people", []))
-        all_keywords = set(event.get("keywords", []))
         all_people.update(new_fact.get("people", []))
-        all_keywords.update(new_fact.get("keywords", []))
         event["people"] = list(all_people)
         
         # Update time range if necessary
@@ -451,14 +446,4 @@ Please determine which events (if any) this new fact should be added to.
             return []
         
         relevant_ids = response.get("relevant_event_ids", [])
-        reason = response.get("reason", "")
-        
-        # Print judgment result (for debugging)
-        if relevant_ids:
-            print(f"  → LLM selected events: {relevant_ids}")
-            print(f"  → Reason: {reason}")
-        else:
-            print(f"  → LLM: No relevant events found. {reason}")
-        
         return relevant_ids
-

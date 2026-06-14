@@ -4,7 +4,7 @@
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import re
 import config
 
@@ -56,7 +56,7 @@ def ensure_directory(directory: str) -> None:
 def calculate_jaccard_similarity(list1: List[str], list2: List[str]) -> float:
     """
     Calculate Jaccard similarity between two lists (exact string matching).
-    This is the original version with case-insensitive exact matching.
+    This helper uses case-insensitive exact matching.
     """
     if not list1 or not list2:
         return 0.0
@@ -65,67 +65,6 @@ def calculate_jaccard_similarity(list1: List[str], list2: List[str]) -> float:
     intersection = len(set1 & set2)
     union = len(set1 | set2)
     return intersection / union if union > 0 else 0.0
-
-
-def calculate_semantic_jaccard_similarity(
-    list1: List[str], 
-    list2: List[str],
-    embedding_model=None,
-    similarity_threshold: float = 0.9
-) -> float:
-    """
-    Calculate Jaccard similarity using semantic matching (embedding-based).
-    
-    Two keywords are considered matching if their embedding similarity > threshold.
-    
-    Args:
-        list1: First list of keywords
-        list2: Second list of keywords
-        embedding_model: EmbeddingModel instance (if None, will create one)
-        similarity_threshold: Threshold for considering two keywords as matching (default: 0.9)
-        
-    Returns:
-        Semantic Jaccard similarity score
-    """
-    if not list1 or not list2:
-        return 0.0
-    
-    # Import here to avoid circular dependency
-    if embedding_model is None:
-        from src.embedding import EmbeddingModel
-        embedding_model = EmbeddingModel()
-    
-    # Get embeddings for all keywords
-    embeddings1 = [embedding_model.encode(kw) for kw in list1]
-    embeddings2 = [embedding_model.encode(kw) for kw in list2]
-    
-    # Build matching matrix: which keywords from list1 match which from list2
-    matched_from_list1 = set()
-    matched_from_list2 = set()
-    
-    for i, emb1 in enumerate(embeddings1):
-        for j, emb2 in enumerate(embeddings2):
-            sim = calculate_cosine_similarity(emb1, emb2)
-            if sim >= similarity_threshold:
-                matched_from_list1.add(i)
-                matched_from_list2.add(j)
-    
-    # Calculate semantic Jaccard
-    # Intersection: keywords that have a match
-    intersection_size = len(matched_from_list1)
-    
-    # Union: all unique keywords (considering semantic matches)
-    # Keywords from list1 that have no match + keywords from list2 that have no match + matched pairs
-    unmatched_from_list1 = len(list1) - len(matched_from_list1)
-    unmatched_from_list2 = len(list2) - len(matched_from_list2)
-    matched_pairs = len(matched_from_list1)  # or len(matched_from_list2), should be similar
-    
-    union_size = unmatched_from_list1 + unmatched_from_list2 + matched_pairs
-    
-    if union_size == 0:
-        return 0.0
-    
-    return intersection_size / union_size
 
 
 def calculate_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -194,16 +133,9 @@ def generate_profile_id(existing_profiles: List[Dict]) -> str:
     return f"P{max_num + 1}"
 
 
-# Alias for backward compatibility
+# Short helper aliases used across storage, retrieval, and graph code.
 cosine_similarity = calculate_cosine_similarity
 jaccard_similarity = calculate_jaccard_similarity
 
 
-def extract_people_intersection(people1: List[str], people2: List[str]) -> bool:
-    """Check if two people lists have intersection."""
-    if not people1 or not people2:
-        return False
-    set1 = set([p.lower() for p in people1])
-    set2 = set([p.lower() for p in people2])
-    return bool(set1 & set2)
 

@@ -1,5 +1,5 @@
 # src/retrieval.py
-# Retrieval Module (v2.0 - Layered Retrieval)
+# Layered retrieval module.
 
 from typing import List, Dict, Any, Tuple
 from src.utils import cosine_similarity, jaccard_similarity
@@ -396,6 +396,3 @@ class LayeredRetriever:
         
         return False
 
-
-# Backward compatibility: keep FactRetriever for any existing code
-FactRetriever = LayeredRetriever

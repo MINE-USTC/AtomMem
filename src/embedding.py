@@ -15,13 +15,25 @@ from sentence_transformers import SentenceTransformer
 import config
 
 
+_MODEL_CACHE: dict[str, SentenceTransformer] = {}
+
+
+def _get_sentence_transformer(model_name: str) -> SentenceTransformer:
+    """Share one loaded embedding model across managers in the same process."""
+    model = _MODEL_CACHE.get(model_name)
+    if model is None:
+        model = SentenceTransformer(model_name)
+        _MODEL_CACHE[model_name] = model
+    return model
+
+
 class EmbeddingModel:
     """Embedding model interface using sentence-transformers."""
     
     def __init__(self):
         """Initialize embedding model."""
         self.dimension = config.EMBEDDING_DIMENSION
-        self.model = None if config.DRY_RUN_EMBEDDING else SentenceTransformer(config.EMBEDDING_MODEL)
+        self.model = None if config.DRY_RUN_EMBEDDING else _get_sentence_transformer(config.EMBEDDING_MODEL)
     
     def encode(self, text: str) -> List[float]:
         """

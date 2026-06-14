@@ -1,5 +1,5 @@
 # src/profile_manager.py
-# Profile Management Module (v2.0)
+# Profile management module.
 
 import os
 from typing import List, Dict, Any
@@ -18,7 +18,6 @@ class ProfileManager:
         self.embedding_model = EmbeddingModel()
         self.prompt_file = os.path.join(config.PROMPTS_DIR, "profile_extraction_prompt.txt")
         self._load_prompt()
-        self.pending_count = 0  # Counter for batch trigger
     
     def _load_prompt(self):
         """Load extraction prompt template."""
@@ -187,4 +186,3 @@ facts:
         
         if pending_facts:
             self.batch_extract_profiles(pending_facts, all_facts, all_profiles)
-
