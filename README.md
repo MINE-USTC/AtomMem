@@ -92,3 +92,56 @@ python scripts/evaluate_locomo.py
 
 This script builds independent memory banks per conversation and evaluates categories 1-4 by default. Detailed question-level predictions and aggregate metrics (F1, BLEU-1, Recall@10, J-Score), along with total token usage, are exported to `runs/locomo_eval/`.
 
+## 🎮 Interactive Demo
+
+AtomMem provides an interactive local browser demo, enabling users to intuitively explore online personalized dialogue. 
+
+### Start the Server
+
+The demo utilizes two OpenAI-compatible API endpoints: 
+﻿ 
+* **General API**: Powers the entire memory construction pipeline and generates the final conversational replies. 
+* **Fact Extractor API**: Dedicated exclusively to extracting atomic facts from each user message. 
+
+You can configure both endpoints in your `.env` file. Then run:
+
+```bash
+python scripts/run_demo_server.py
+```
+
+You can also pass the settings explicitly via CLI:
+
+```bash
+python scripts/run_demo_server.py \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --general-api-key YOUR_GENERAL_KEY \
+  --general-api-base https://api.openai.com/v1 \
+  --general-model your_general_model \
+  --fact-api-key YOUR_FACT_EXTRACTOR_KEY \
+  --fact-api-base https://your-fact-extractor-endpoint/v1 \
+  --fact-model your_fact_extractor_model
+```
+
+🌐 Open http://127.0.0.1:8000 in your browser after the server starts.
+
+### Use the Web UI
+
+1. Click **Settings**.
+2. Fill in the General API and Fact Extractor API settings.
+3. Click **Apply Settings & New Session**.
+4. Send messages in the chat panel.
+5. Watch the **Live Memory** panel update with facts, events, and profiles.
+
+🔄 Background Processing: The assistant reply is generated before the latest user message is written into memory. After the reply appears, the memory update runs in the background. The status area dynamically shows whether the session is ready, generating an answer, updating memory, or reporting an error.
+
+### Memory Panel Features
+
+- 🧩 **Facts** show atomic, standalone facts extracted from user messages.
+- 📅 **Events** group facts that describe the same occurrence.
+- 👤 **Profiles** store longer-term user attributes and preferences.
+- ⏳ **Pending Profiles** shows how many profile-worthy facts are waiting for the
+  next profile extraction batch.
+- ⚡ **Flush Profiles** forces pending profile extraction immediately.
+
+Demo memory files are written to `runs/demo_memory/` by default.
