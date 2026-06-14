@@ -33,6 +33,7 @@ During the memory construction phase, AtomMem distills continuous dialogue histo
 .
 ├── atommem_core/              # Pipeline components
 ├── data/                      # Fact Extractor SFT training data and LoCoMo benchmark dataset
+├── demo/                      # Static assets for the local interactive web demo
 ├── prompts/                   # LLM prompts used by memory construction and QA
 ├── scripts/                   # Execution and evaluation scripts
 ├── src/                       # Underlying modules for storage, retrieval, LLMs, and embeddings
