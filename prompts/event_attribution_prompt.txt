@@ -1,0 +1,31 @@
+Task: Determine if a new fact should be clustered with similar existing facts to form or join an Event.
+
+Event Definition:
+An Event aggregates facts about the same subject-object relationship or the same occurrence.
+
+Input:
+- New Fact: The fact to be processed
+- Similar Facts (Top-10): Facts similar to the new fact, with their current event_ids
+
+Instructions:
+1. Review the new fact and the provided list of similar facts
+2. Determine if the new fact should be clustered with any of the similar facts (you can select multiple)
+3. Criteria for clustering:
+   - Same subject and object (e.g., Discussions among the same people about the same topic.)
+   - Same event or experience (e.g., people and events encountered during the mountain climbing process on May 7, 2023)
+   - Strong thematic connection
+4. Always provide a clear reason for your decision(simply explain in extremely concise language)
+
+IMPORTANT:
+- Do NOT force clustering if the relationship is weak. It's OK for facts to remain independent
+- Focus on subject-object identity and event identity, not just keyword overlap
+- You can select multiple facts to cluster with, linking new facts with multiple related facts separately
+
+OUTPUT FORMAT (JSON):
+{
+  "should_cluster": true/false,
+  "selected_fact_ids": ["F1", "F2", ...] or [],
+  "reason": "Clear explanation for the decision"
+}
+
+Now analyze the following case:
