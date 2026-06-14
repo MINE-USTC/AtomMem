@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AtomMem Demo</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div id="settingsOverlay" class="drawer-overlay"></div>
+    <aside id="settingsDrawer" class="settings-drawer" aria-label="Settings">
+      <header class="drawer-header">
+        <div>
+          <h2>Settings</h2>
+          <p>Configure local demo endpoints</p>
+        </div>
+        <button id="settingsClose" class="icon-button" title="Close settings">Close</button>
+      </header>
+
+      <section class="drawer-body">
+        <div class="settings-group">
+          <h3>General API</h3>
+          <label>API Key<input id="generalApiKey" type="password" autocomplete="off" /></label>
+          <label>API Base<input id="generalApiBase" type="text" /></label>
+          <label>Model<input id="generalModel" type="text" /></label>
+        </div>
+        <div class="settings-group">
+          <h3>Fact Extractor API</h3>
+          <label>API Key<input id="factApiKey" type="password" autocomplete="off" /></label>
+          <label>API Base<input id="factApiBase" type="text" /></label>
+          <label>Fine-tuned Model<input id="factModel" type="text" /></label>
+        </div>
+      </section>
+
+      <footer class="drawer-footer">
+        <button id="applySettings">Apply Settings & New Session</button>
+        <span id="settingsStatus"></span>
+      </footer>
+    </aside>
+
+    <main class="app-shell">
+      <section class="chat-pane">
+        <header class="topbar">
+          <div>
+            <h1>AtomMem</h1>
+            <p>Online personalized memory demo</p>
+          </div>
+          <button id="settingsToggle" class="icon-button" title="Settings">Settings</button>
+        </header>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="chatForm" class="composer">
+          <textarea id="messageInput" rows="3" placeholder="Tell the assistant something..."></textarea>
+          <button id="sendButton" type="submit">Send</button>
+        </form>
+      </section>
+
+      <aside class="memory-pane">
+        <header class="memory-header">
+          <div>
+            <h2>Live Memory</h2>
+            <p id="sessionInfo">No session</p>
+          </div>
+          <button id="flushProfiles" title="Process pending profile facts">Flush Profiles</button>
+        </header>
+
+        <section class="status-card">
+          <div>
+            <span class="label">Status</span>
+            <strong id="memoryStatus">Not started</strong>
+          </div>
+          <div>
+            <span class="label">Pending Profiles</span>
+            <strong id="pendingProfiles">0 / 10</strong>
+          </div>
+        </section>
+
+        <nav class="tabs">
+          <button class="tab active" data-tab="facts">Facts</button>
+          <button class="tab" data-tab="events">Events</button>
+          <button class="tab" data-tab="profiles">Profiles</button>
+        </nav>
+
+        <section id="facts" class="memory-list active"></section>
+        <section id="events" class="memory-list"></section>
+        <section id="profiles" class="memory-list"></section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js?v=public"></script>
+  </body>
+</html>
