@@ -1,18 +1,15 @@
 ﻿# Event-level memory construction.
 
-import argparse
 import json
-import os
 import time
 from typing import Any, Dict, List, Tuple
 
 import config
 from src.event_manager import EventManager
 from src.fact_storage import FactStorageManager
-from src.llm_interface import LLMInterface
 from src.query_response import QueryResponder
 from src.utils import cosine_similarity, jaccard_similarity
-from atommem_core.preextracted_pipeline import PreExtractedFactsPipelineTester
+from atommem_core.preextracted_pipeline import PreExtractedFactsPipeline
 
 
 class EventLevelEventManager(EventManager):
@@ -254,13 +251,6 @@ Select all candidates that describe the same event as the new fact.
         ]
         reason = response.get("reason", "")
 
-        if selected_event_ids or selected_singleton_fact_ids:
-            print(f"  -> Event-level selected events: {selected_event_ids}")
-            print(f"  -> Event-level selected singleton facts: {selected_singleton_fact_ids}")
-            print(f"  -> Reason: {reason}")
-        else:
-            print(f"  -> Event-level LLM: no matching event. {reason}")
-
         return (
             list(dict.fromkeys(selected_event_ids)),
             list(dict.fromkeys(selected_singleton_fact_ids)),
@@ -299,9 +289,9 @@ class EventLevelFactStorageManager(FactStorageManager):
 
 
 class SingleRoundQueryResponder(QueryResponder):
-    """Query responder that keeps evidence summary but disables follow-up retrieval."""
+    """Query responder that answers directly from one retrieval round."""
 
-    def answer_query(self, query: str) -> Dict[str, Any]:
+    def answer_query(self, query: str, category: Any = None) -> Dict[str, Any]:
         """Answer a query with exactly one retrieval round."""
         latency: Dict[str, float] = {}
 
@@ -327,22 +317,13 @@ class SingleRoundQueryResponder(QueryResponder):
         latency["retrieval_ms"] = (time.time() - _t) * 1000
 
         _t = time.time()
-        evidence_summary = self._summarize_retrieved_evidence(
-            query,
-            query_info,
-            retrieval_result["facts"],
-            retrieval_result["profiles"],
-        )
-        latency["evidence_summary_ms"] = (time.time() - _t) * 1000
-
-        _t = time.time()
         answer = self._generate_answer(
             query,
             retrieval_result["facts"],
             retrieval_result["profiles"],
             retrieval_result["event_contexts"],
             query_info=query_info,
-            evidence_summary=evidence_summary,
+            category=category,
         )
         latency["answer_generation_ms"] = (time.time() - _t) * 1000
 
@@ -359,10 +340,7 @@ class SingleRoundQueryResponder(QueryResponder):
             "retrieved_facts": retrieval_result["facts"],
             "retrieved_profiles": retrieval_result["profiles"],
             "event_contexts": retrieval_result["event_contexts"],
-            "evidence_summary": evidence_summary,
             "retrieval_rounds": 1,
-            "no_useful_retrieval_rounds": 0,
-            "stopped_for_insufficient_evidence": False,
             "query_info": {
                 "need_specific": query_info.get("need_specific", False),
                 "need_attribute": query_info.get("need_attribute", False),
@@ -374,20 +352,18 @@ class SingleRoundQueryResponder(QueryResponder):
         }
 
 
-class EventLevelPreExtractedFactsPipelineTester(PreExtractedFactsPipelineTester):
-    """Pre-extracted pipeline tester using event-level attribution."""
+class EventLevelPreExtractedFactsPipeline(PreExtractedFactsPipeline):
+    """Pre-extracted pipeline using event-level attribution."""
 
     def __init__(self, conversation_id: str, output_dir: str = "runs/atommem"):
         super().__init__(conversation_id, output_dir)
         self.fact_storage = EventLevelFactStorageManager(conversation_id)
         self.query_responder = SingleRoundQueryResponder(conversation_id, llm=self.llm)
-        print("-> Event attribution mode: one-stage event-level retrieval")
-        print("-> QA retrieval mode: single round with evidence summary")
 
     def get_aggregate_llm_statistics(self) -> Dict[str, Any]:
         """Aggregate token statistics from every LLM-owning module."""
         llm_instances = {
-            "tester_llm": self.llm,
+            "pipeline_llm": self.llm,
             "fact_storage_llm": self.fact_storage.llm,
             "event_manager_llm": self.fact_storage.event_manager.llm,
             "profile_manager_llm": self.fact_storage.profile_manager.llm,

@@ -1,20 +1,15 @@
-﻿# test_preextracted_pipeline_fact_seeded_event_level_incremental_temporal_profile.py
 # Fact-seeded event-level pipeline with incremental temporal profile updates.
 
-import argparse
 import json
 import os
 import re
 import sys
-import time
-from collections import Counter
 from typing import Any, Dict, List, Optional
 
-import config
 from src.fact_storage import FactStorageManager
 from src.llm_interface import LLMInterface
 from src.utils import generate_profile_id
-from atommem_core.preextracted_pipeline import PreExtractedFactsPipelineTester
+from atommem_core.preextracted_pipeline import PreExtractedFactsPipeline
 from atommem_core.fact_seeded_event_pipeline import (
     FactSeededEventLevelEventManager,
     KeywordNormalizedProfileManager,
@@ -25,7 +20,6 @@ from atommem_core.temporal_profile_version_chain import (
     TemporalProfileQueryResponder,
     compare_dates,
     normalize_date_value,
-    save_json,
 )
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -35,7 +29,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 DEFAULT_OUTPUT_DIR = "runs/atommem"
-DEFAULT_EVAL_SUFFIX = "incremental-temporal-profile"
 
 
 def extract_profile_content_time(content: Any) -> str:
@@ -73,9 +66,6 @@ class IncrementalTemporalProfileProcessor(TemporalProfileBuilder):
         super().__init__(llm=llm, top_k=top_k, min_llm_score=min_llm_score)
         self.output_dir = output_dir
         self.conversation_id = conversation_id
-        self.action_records: List[Dict[str, Any]] = []
-        self.action_counter: Counter = Counter()
-        self.source_counter: Counter = Counter()
 
     def _prepare_candidate(
         self,
@@ -94,10 +84,6 @@ class IncrementalTemporalProfileProcessor(TemporalProfileBuilder):
         candidate: Dict[str, Any],
         temporal_profiles: List[Dict[str, Any]],
         fact_lookup: Dict[str, Dict[str, Any]],
-        batch_id: int,
-        item_index: int,
-        batch_total: int,
-        person: str,
     ) -> bool:
         prepared = self._prepare_candidate(candidate, fact_lookup)
         if not prepared.get("content"):
@@ -109,38 +95,11 @@ class IncrementalTemporalProfileProcessor(TemporalProfileBuilder):
         if not candidates or top_score < self.min_llm_score:
             temporal_profiles.append(prepared)
             self.stats["created"] += 1
-            decision = {
-                "decisions": [],
-                "new_profile": True,
-                "new_content": prepared.get("content", ""),
-            }
-            self._record_action(
-                batch_id,
-                item_index,
-                batch_total,
-                person,
-                prepared,
-                candidates,
-                decision,
-                source="direct_new_low_score",
-                applied=True,
-            )
             return True
 
         direct_decision = self._direct_decision(prepared, candidates)
         if direct_decision:
             applied = self._apply_decision(prepared, temporal_profiles, direct_decision)
-            self._record_action(
-                batch_id,
-                item_index,
-                batch_total,
-                person,
-                prepared,
-                candidates,
-                direct_decision,
-                source="deterministic_exact",
-                applied=applied,
-            )
             return applied
 
         decision = self._llm_decide(prepared, candidates)
@@ -148,174 +107,12 @@ class IncrementalTemporalProfileProcessor(TemporalProfileBuilder):
         if not applied:
             temporal_profiles.append(prepared)
             self.stats["fallback_new"] += 1
-            fallback = {
-                "decisions": [],
-                "new_profile": True,
-                "new_content": prepared.get("content", ""),
-                "raw_decision": decision,
-            }
-            self._record_action(
-                batch_id,
-                item_index,
-                batch_total,
-                person,
-                prepared,
-                candidates,
-                fallback,
-                source="fallback_new_after_unapplied",
-                applied=True,
-            )
             return True
 
-        self._record_action(
-            batch_id,
-            item_index,
-            batch_total,
-            person,
-            prepared,
-            candidates,
-            decision,
-            source="llm",
-            applied=True,
-        )
         return True
 
     def normalize_profiles(self, profiles: List[Dict[str, Any]]) -> None:
         self._normalize_timelines(profiles)
-
-    def _record_action(
-        self,
-        batch_id: int,
-        item_index: int,
-        batch_total: int,
-        person: str,
-        candidate: Dict[str, Any],
-        candidates: List[Dict[str, Any]],
-        decision: Dict[str, Any],
-        source: str,
-        applied: bool,
-    ) -> None:
-        self.source_counter[source] += 1
-        decisions = decision.get("decisions", []) if isinstance(decision, dict) else []
-        if not isinstance(decisions, list):
-            decisions = []
-
-        action_labels = []
-        for item in decisions:
-            if not isinstance(item, dict):
-                continue
-            action = item.get("action", "")
-            profile_id = item.get("profile_id", "")
-            if action:
-                self.action_counter[action] += 1
-                action_labels.append(f"{profile_id}:{action}")
-
-        if decision.get("new_profile") is True:
-            self.action_counter["new"] += 1
-            action_labels.append("NEW")
-        if not action_labels:
-            self.action_counter["no_action"] += 1
-            action_labels.append("NO_ACTION")
-
-        top = candidates[0] if candidates else {}
-        record = {
-            "batch_id": batch_id,
-            "batch_item_index": item_index,
-            "batch_total": batch_total,
-            "source": source,
-            "applied": applied,
-            "person": person,
-            "candidate": self._compact_profile(candidate),
-            "top_candidate": self._compact_candidate_row(top) if top else None,
-            "retrieved_candidates": [self._compact_candidate_row(row) for row in candidates],
-            "decision": decision,
-            "action_labels": action_labels,
-        }
-        self.action_records.append(record)
-
-        top_desc = "none"
-        if top:
-            top_desc = f"{top.get('profile_id')} score={top.get('score', 0):.3f}"
-        print(
-            f"[profile-batch {batch_id} {item_index}/{batch_total}] "
-            f"{candidate.get('profile_id')} person={person} top={top_desc} "
-            f"source={source} actions={action_labels} applied={applied}",
-            flush=True,
-        )
-
-    @staticmethod
-    def _compact_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "profile_id": profile.get("profile_id"),
-            "person": profile.get("person"),
-            "content": profile.get("content", ""),
-            "keywords": profile.get("keywords", []),
-            "valid_from": profile.get("valid_from", ""),
-            "evidence": profile.get("evidence", []),
-        }
-
-    @staticmethod
-    def _compact_candidate_row(row: Dict[str, Any]) -> Dict[str, Any]:
-        profile = row.get("profile", {})
-        return {
-            "profile_id": row.get("profile_id"),
-            "score": round(row.get("score", 0.0), 4),
-            "embedding_similarity": round(row.get("embedding_similarity", 0.0), 4),
-            "keyword_jaccard": round(row.get("keyword_jaccard", 0.0), 4),
-            "person": profile.get("person"),
-            "content": profile.get("content", ""),
-            "keywords": profile.get("keywords", []),
-            "valid_from": profile.get("valid_from", ""),
-            "history_count": len(profile.get("history", []) or []),
-        }
-
-    def save_action_records(self) -> None:
-        os.makedirs(self.output_dir, exist_ok=True)
-        payload = {
-            "conversation_id": self.conversation_id,
-            "prompt_file": os.path.join(config.PROMPTS_DIR, "profile_temporal_update_prompt.txt"),
-            "action_counts": dict(self.action_counter),
-            "source_counts": dict(self.source_counter),
-            "records": self.action_records,
-        }
-
-        json_path = os.path.join(self.output_dir, f"profile_action_trace_{self.conversation_id}.json")
-        jsonl_path = os.path.join(self.output_dir, f"profile_action_trace_{self.conversation_id}.jsonl")
-        md_path = os.path.join(self.output_dir, f"profile_action_trace_{self.conversation_id}.md")
-        save_json(payload, json_path)
-
-        with open(jsonl_path, "w", encoding="utf-8") as f:
-            for record in self.action_records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-        lines = [
-            "# Incremental Temporal Profile Action Trace",
-            "",
-            f"- Conversation: `{self.conversation_id}`",
-            f"- Records: {len(self.action_records)}",
-            f"- Action counts: {dict(self.action_counter)}",
-            f"- Source counts: {dict(self.source_counter)}",
-            "",
-        ]
-        for record in self.action_records:
-            cand = record["candidate"]
-            lines.append(
-                f"## Batch {record['batch_id']} / {record['batch_item_index']} - "
-                f"{cand.get('profile_id')} / {cand.get('person')} / {record['source']}"
-            )
-            lines.append(f"- Actions: {record['action_labels']}")
-            lines.append(f"- Applied: {record['applied']}")
-            lines.append(f"- Candidate: {cand.get('content')}")
-            top = record.get("top_candidate")
-            if top:
-                lines.append(f"- Top: {top.get('profile_id')} score={top.get('score')} content={top.get('content')}")
-            lines.append(f"- Decision: `{json.dumps(record['decision'], ensure_ascii=False)}`")
-            lines.append("")
-
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        print(f"Saved profile action trace: {json_path}")
 
 
 class IncrementalTemporalProfileManager(KeywordNormalizedProfileManager):
@@ -332,7 +129,6 @@ class IncrementalTemporalProfileManager(KeywordNormalizedProfileManager):
             top_k=top_k,
             min_llm_score=min_llm_score,
         )
-        self.batch_counter = 0
         self._reserved_profile_ids: List[Dict[str, Any]] = []
 
     def batch_extract_profiles(
@@ -344,8 +140,6 @@ class IncrementalTemporalProfileManager(KeywordNormalizedProfileManager):
         if not pending_facts:
             return
 
-        self.batch_counter += 1
-        batch_id = self.batch_counter
         fact_lookup = {fact.get("fact_id"): fact for fact in all_facts if fact.get("fact_id")}
 
         facts_by_person: Dict[str, List[Dict[str, Any]]] = {}
@@ -362,19 +156,11 @@ class IncrementalTemporalProfileManager(KeywordNormalizedProfileManager):
                 if candidate:
                     extracted_candidates.append(candidate)
 
-        batch_total = len(extracted_candidates)
-        if batch_total:
-            print(f"[profile-batch {batch_id}] extracted {batch_total} candidate profiles")
-
-        for item_index, candidate in enumerate(extracted_candidates, 1):
+        for candidate in extracted_candidates:
             self.temporal_processor.process_candidate(
                 candidate=candidate,
                 temporal_profiles=all_profiles,
                 fact_lookup=fact_lookup,
-                batch_id=batch_id,
-                item_index=item_index,
-                batch_total=batch_total,
-                person=candidate.get("person", ""),
             )
 
         self.temporal_processor.normalize_profiles(all_profiles)
@@ -416,18 +202,6 @@ class IncrementalTemporalProfileManager(KeywordNormalizedProfileManager):
         profile_id = generate_profile_id(list(all_profiles) + self._reserved_profile_ids)
         self._reserved_profile_ids.append({"profile_id": profile_id})
         return profile_id
-
-    def save_action_records(self):
-        self.temporal_processor.save_action_records()
-
-    def get_temporal_stats(self) -> Dict[str, Any]:
-        return {
-            "batches": self.batch_counter,
-            "action_counts": dict(self.temporal_processor.action_counter),
-            "source_counts": dict(self.temporal_processor.source_counter),
-            "processor_stats": self.temporal_processor.stats,
-        }
-
 
 class IncrementalTemporalProfileFactStorageManager(FactStorageManager):
     """Fact storage manager wired to fact-seeded events and incremental temporal profiles."""
@@ -496,7 +270,7 @@ class IncrementalTemporalProfileQueryResponder(TemporalProfileQueryResponder):
         return result
 
 
-class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
+class IncrementalTemporalProfilePipeline(PreExtractedFactsPipeline):
     """Full pre-extracted pipeline with incremental temporal profile construction."""
 
     def __init__(
@@ -506,7 +280,7 @@ class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
         profile_top_k: int = 8,
         min_profile_llm_score: float = 0.55,
     ):
-        PreExtractedFactsPipelineTester.__init__(self, conversation_id, output_dir)
+        PreExtractedFactsPipeline.__init__(self, conversation_id, output_dir)
         self.fact_storage = IncrementalTemporalProfileFactStorageManager(
             conversation_id=conversation_id,
             output_dir=output_dir,
@@ -514,9 +288,6 @@ class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
             min_profile_llm_score=min_profile_llm_score,
         )
         self.query_responder = IncrementalTemporalProfileQueryResponder(conversation_id, llm=self.llm)
-        print("-> Event attribution mode: fact-seeded one-stage event-level retrieval")
-        print("-> Profile mode: incremental temporal profile timeline update after each batch")
-        print("-> QA retrieval mode: single round with temporal profile version selection")
 
     def extract_fact_metadata(
         self,
@@ -542,7 +313,6 @@ class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
     def process_all_facts(self, dialogue_results: List[Dict[str, Any]], start_session: str = None):
         result = super().process_all_facts(dialogue_results, start_session=start_session)
         self._finalize_temporal_profiles()
-        self.save_profile_action_trace()
         self.save_memory_snapshot()
         return result
 
@@ -550,20 +320,6 @@ class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
         profiles = self.fact_storage.storage.load_profiles()
         self.fact_storage.profile_manager.temporal_processor.normalize_profiles(profiles)
         self.fact_storage.storage.save_profiles(profiles)
-
-    def save_profile_action_trace(self) -> None:
-        self.fact_storage.profile_manager.save_action_records()
-        stats_path = os.path.join(self.output_dir, f"profile_build_stats_{self.conversation_id}.json")
-        profiles = self.fact_storage.storage.load_profiles()
-        stats = self.fact_storage.profile_manager.get_temporal_stats()
-        stats.update({
-            "conversation_id": self.conversation_id,
-            "output_profiles": len(profiles),
-            "profiles_with_history": sum(1 for p in profiles if p.get("history")),
-            "history_versions": sum(len(p.get("history", []) or []) for p in profiles),
-        })
-        save_json(stats, stats_path)
-        print(f"Saved profile build stats: {stats_path}")
 
     def save_memory_snapshot(self) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
@@ -574,11 +330,10 @@ class IncrementalTemporalProfilePipelineTester(PreExtractedFactsPipelineTester):
             path = os.path.join(self.output_dir, f"{name}_{self.conversation_id}.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            print(f"Saved {len(data)} {name}: {path}")
 
     def get_aggregate_llm_statistics(self) -> Dict[str, Any]:
         llm_instances = {
-            "tester_llm": self.llm,
+            "pipeline_llm": self.llm,
             "fact_storage_llm": self.fact_storage.llm,
             "event_manager_llm": self.fact_storage.event_manager.llm,
             "profile_manager_llm": self.fact_storage.profile_manager.llm,

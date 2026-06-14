@@ -1,24 +1,12 @@
-﻿# experiment_fact_graph_multichannel.py
-# Multi-channel fact graph ablation/tuning over prebuilt memory snapshots.
+# Multi-channel fact graph index and retriever.
 
-import argparse
-import copy
-import json
 import math
-import os
 import re
-import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import config
-from src.embedding import EmbeddingModel
-from src.llm_interface import LLMInterface
-from src.retrieval import LayeredRetriever
-from src.utils import cosine_similarity, jaccard_similarity
-from atommem_core.temporal_profile_version_chain import compare_dates, normalize_date_value, time_in_interval
 
 
 ROLE_PEOPLE = {"user", "assistant", "system"}
@@ -77,18 +65,6 @@ def normalize_people(values: Iterable[Any]) -> List[str]:
         seen.add(item)
         normalized.append(item)
     return normalized
-
-
-def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def find_one(directory: str, pattern: str) -> str:
-    matches = sorted(Path(directory).glob(pattern))
-    if not matches:
-        raise FileNotFoundError(f"No file matching {pattern} under {directory}")
-    return str(matches[0])
 
 
 def parse_dia_id(dia_id: Any, fallback_order: int) -> Tuple[str, int]:
@@ -187,7 +163,6 @@ class MultiChannelFactGraphRetriever:
     def __init__(self, index: MultiChannelFactGraphIndex, graph_config: GraphConfig):
         self.index = index
         self.config = graph_config
-        self.last_debug: Dict[str, Any] = {}
 
     def retrieve(
         self,

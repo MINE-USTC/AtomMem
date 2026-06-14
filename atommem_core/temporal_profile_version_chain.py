@@ -1,7 +1,5 @@
-﻿# test_temporal_profile_version_chain.py
-# Sidecar experiment for temporal profile version chains.
+# Temporal profile version chain utilities.
 
-import argparse
 import copy
 import json
 import os
@@ -16,7 +14,6 @@ from src.embedding import EmbeddingModel
 from src.llm_interface import LLMInterface
 from src.utils import cosine_similarity, jaccard_similarity
 from atommem_core.fact_seeded_event_pipeline import (
-    FactSeededEventLevelPreExtractedFactsPipelineTester,
     KeywordNormalizedSingleRoundQueryResponder,
     normalize_keyword_list,
 )
@@ -28,17 +25,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 TEMPORAL_UPDATE_PROMPT = os.path.join(config.PROMPTS_DIR, "profile_temporal_update_prompt.txt")
-
-
-def load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_json(data: Dict[str, Any], path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def profile_sort_key(profile: Dict[str, Any]) -> Tuple[int, str]:
@@ -210,11 +196,6 @@ class TemporalProfileBuilder:
                 self._apply_decision(prepared, temporal_profiles, direct_decision)
                 continue
 
-            print(
-                f"[profile {index}/{len(source_profiles)}] "
-                f"{prepared.get('profile_id')} top={candidates[0]['profile_id']} "
-                f"score={candidates[0]['score']:.3f}"
-            )
             decision = self._llm_decide(prepared, candidates)
             applied = self._apply_decision(prepared, temporal_profiles, decision)
             if not applied:
@@ -582,7 +563,7 @@ class TemporalProfileBuilder:
 class TemporalProfileQueryResponder(KeywordNormalizedSingleRoundQueryResponder):
     """Single-round QA with temporal profile version selection after Top-k retrieval."""
 
-    def answer_query(self, query: str) -> Dict[str, Any]:
+    def answer_query(self, query: str, category: Any = None) -> Dict[str, Any]:
         latency: Dict[str, float] = {}
 
         _t = time.time()
@@ -611,22 +592,13 @@ class TemporalProfileQueryResponder(KeywordNormalizedSingleRoundQueryResponder):
         latency["retrieval_ms"] = (time.time() - _t) * 1000
 
         _t = time.time()
-        evidence_summary = self._summarize_retrieved_evidence(
-            query,
-            query_info,
-            retrieval_result["facts"],
-            retrieval_result["profiles"],
-        )
-        latency["evidence_summary_ms"] = (time.time() - _t) * 1000
-
-        _t = time.time()
         answer = self._generate_answer(
             query,
             retrieval_result["facts"],
             retrieval_result["profiles"],
             retrieval_result["event_contexts"],
             query_info=query_info,
-            evidence_summary=evidence_summary,
+            category=category,
         )
         latency["answer_generation_ms"] = (time.time() - _t) * 1000
 
@@ -638,10 +610,7 @@ class TemporalProfileQueryResponder(KeywordNormalizedSingleRoundQueryResponder):
             "retrieved_facts": retrieval_result["facts"],
             "retrieved_profiles": retrieval_result["profiles"],
             "event_contexts": retrieval_result["event_contexts"],
-            "evidence_summary": evidence_summary,
             "retrieval_rounds": 1,
-            "no_useful_retrieval_rounds": 0,
-            "stopped_for_insufficient_evidence": False,
             "query_info": {
                 "need_specific": query_info.get("need_specific", False),
                 "need_attribute": query_info.get("need_attribute", False),

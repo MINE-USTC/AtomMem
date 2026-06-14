@@ -1,23 +1,16 @@
-﻿# test_preextracted_pipeline_fact_seeded_event_level.py
 # Pre-extracted facts pipeline with fact-seeded one-stage event attribution.
 
-import argparse
-import json
-import os
 import re
-import time
 from typing import Any, Dict, List
 
 import config
-from src.fact_storage import FactStorageManager
-from src.llm_interface import LLMInterface
+from src.fact_storage import FactStorageManager, people_sets_compatible
 from src.profile_manager import ProfileManager
-from src.query_response import QueryResponder
 from src.utils import cosine_similarity, jaccard_similarity
-from atommem_core.preextracted_pipeline import PreExtractedFactsPipelineTester
+from atommem_core.preextracted_pipeline import PreExtractedFactsPipeline
 from atommem_core.event_level_pipeline import (
     EventLevelEventManager,
-    EventLevelPreExtractedFactsPipelineTester,
+    EventLevelPreExtractedFactsPipeline,
     SingleRoundQueryResponder,
 )
 
@@ -148,7 +141,7 @@ class FactSeededEventLevelEventManager(EventLevelEventManager):
             if fact.get("fact_id") == new_fact.get("fact_id"):
                 continue
             fact_people = set(fact.get("people", []) or [])
-            if not (new_people & fact_people):
+            if not people_sets_compatible(new_people, fact_people):
                 continue
 
             emb_sim = cosine_similarity(fact.get("embedding", []), new_fact.get("embedding", []))
@@ -205,19 +198,17 @@ class KeywordNormalizedSingleRoundQueryResponder(SingleRoundQueryResponder):
         return query_info
 
 
-class FactSeededEventLevelPreExtractedFactsPipelineTester(EventLevelPreExtractedFactsPipelineTester):
-    """Pre-extracted pipeline tester using fact-seeded event-level attribution."""
+class FactSeededEventLevelPreExtractedFactsPipeline(EventLevelPreExtractedFactsPipeline):
+    """Pre-extracted pipeline using fact-seeded event-level attribution."""
 
     def __init__(
         self,
         conversation_id: str,
         output_dir: str = "runs/atommem",
     ):
-        PreExtractedFactsPipelineTester.__init__(self, conversation_id, output_dir)
+        PreExtractedFactsPipeline.__init__(self, conversation_id, output_dir)
         self.fact_storage = FactSeededEventLevelFactStorageManager(conversation_id)
         self.query_responder = KeywordNormalizedSingleRoundQueryResponder(conversation_id, llm=self.llm)
-        print("-> Event attribution mode: fact-seeded one-stage event-level retrieval")
-        print("-> QA retrieval mode: single round with evidence summary")
 
     def extract_fact_metadata(
         self,

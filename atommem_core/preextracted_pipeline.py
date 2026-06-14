@@ -1,12 +1,8 @@
-﻿# test_preextracted_pipeline.py
 # Pipeline for processing pre-extracted facts from batch extraction
 
 import json
 import os
 from typing import List, Dict, Any, Tuple
-from collections import Counter
-import re
-import math
 
 from src.llm_interface import LLMInterface
 from src.embedding import EmbeddingModel
@@ -16,12 +12,12 @@ from src.utils import generate_fact_id, parse_session_datetime
 import time
 
 
-class PreExtractedFactsPipelineTester:
-    """Test pipeline for processing pre-extracted facts."""
+class PreExtractedFactsPipeline:
+    """Pipeline for processing pre-extracted facts."""
     
     def __init__(self, conversation_id: str, output_dir: str = "runs/atommem"):
         """
-        Initialize tester.
+        Initialize the pipeline.
         
         Args:
             conversation_id: Conversation ID for storage
@@ -44,8 +40,6 @@ class PreExtractedFactsPipelineTester:
         self.metadata_prompt_file = os.path.join("prompts", "fact_metadata_extraction_prompt.txt")
         self._load_metadata_prompt()
         
-        print(f"✓ Initialized tester for conversation: {conversation_id}")
-        print(f"✓ Output directory: {output_dir}")
     
     def _load_metadata_prompt(self):
         """Load fact metadata extraction prompt."""
@@ -67,10 +61,6 @@ class PreExtractedFactsPipelineTester:
         
         metadata = data.get('metadata', {})
         results = data.get('results', [])
-        
-        print(f"✓ Loaded pre-extracted facts from: {facts_file}")
-        print(f"  - Total dialogues: {metadata.get('total_dialogues', len(results))}")
-        print(f"  - Total facts: {metadata.get('total_facts', 0)}")
         
         return metadata, results
     
@@ -162,9 +152,9 @@ Extract metadata for this fact.
         # Generate embedding
         embedding = self.embedding_model.encode(fact_text)
         
-        # Generate unique fact ID - load from storage to avoid duplicates
-        all_stored_facts = self.fact_storage.storage.load_facts()
-        fact_id = generate_fact_id(all_stored_facts)
+        # Generate unique fact ID from the in-memory build state. Re-reading the
+        # full facts JSON for every incoming fact is both slow and memory-heavy.
+        fact_id = generate_fact_id(existing_facts)
         
         # Build complete fact tuple
         fact_tuple = {
@@ -180,6 +170,29 @@ Extract metadata for this fact.
         }
         
         return fact_tuple
+
+    @staticmethod
+    def _count_session_turns(dialogue_results: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for dialogue in dialogue_results:
+            session = dialogue.get('session', 'unknown')
+            counts[session] = counts.get(session, 0) + 1
+        return counts
+
+    @staticmethod
+    def _print_session_progress(session: str, completed_turns: int, total_turns: int) -> None:
+        total = max(total_turns, 1)
+        completed = min(max(completed_turns, 0), total)
+        width = 30
+        filled = int(width * completed / total)
+        bar = "#" * filled + "-" * (width - filled)
+        print(f"\r[{session.upper()}] [{bar}] {completed}/{total_turns} turns", end="", flush=True)
+
+    def _finish_session_progress(self, session: str, completed_turns: int, total_turns: int) -> None:
+        if completed_turns < total_turns:
+            self._print_session_progress(session, completed_turns, total_turns)
+        print()
+        print(f"[{session.upper()}] Completed", flush=True)
     
     def process_all_facts(self, dialogue_results: List[Dict[str, Any]], start_session: str = None):
         """
@@ -192,17 +205,12 @@ Extract metadata for this fact.
         Returns:
             Dict with runtime, per_fact_latencies, and storage_snapshots.
         """
-        print(f"\n{'='*60}")
-        print("PHASE 1: PROCESSING PRE-EXTRACTED FACTS")
-        if start_session:
-            print(f"Starting from session: {start_session}")
-        print(f"{'='*60}\n")
-        
         start_time = time.time()
         
         total_dialogues = 0
         total_facts_processed = 0
-        existing_facts = []
+        existing_facts = list(self.fact_storage.storage.load_facts())
+        session_turn_counts = self._count_session_turns(dialogue_results)
 
         # Efficiency tracking
         per_fact_latencies: List[Dict[str, float]] = []
@@ -212,10 +220,9 @@ Extract metadata for this fact.
         # Group dialogues by session for context
         current_session = None
         session_dialogues = []
+        session_turn_progress = 0
         
-        # Flag to track if we should start processing
         should_process = (start_session is None)
-        skipped_dialogues = 0
         
         for idx, dialogue in enumerate(dialogue_results):
             session = dialogue.get('session', 'unknown')
@@ -228,7 +235,11 @@ Extract metadata for this fact.
             if current_session != session:
                 # Record storage snapshot at end of previous session
                 if current_session is not None and should_process:
-                    print(f"\n[{current_session.upper()}] Completed")
+                    self._finish_session_progress(
+                        current_session,
+                        session_turn_progress,
+                        session_turn_counts.get(current_session, session_turn_progress),
+                    )
                     stored_facts = self.fact_storage.storage.load_facts()
                     stored_events = self.fact_storage.storage.load_events()
                     stored_profiles = self.fact_storage.storage.load_profiles()
@@ -243,33 +254,35 @@ Extract metadata for this fact.
 
                 current_session = session
                 session_dialogues = []
+                session_turn_progress = 0
                 
                 # Check if this is the session to start from
                 if start_session and not should_process:
                     if session.lower() == start_session.lower():
                         should_process = True
-                        print(f"\n[{session.upper()}] Starting from this session...")
-                        print(f"  Time: {session_time}")
-                        print(f"  Skipped {skipped_dialogues} dialogues from previous sessions\n")
+                        print(f"\n[{session.upper()}] Processing session...", flush=True)
+                        self._print_session_progress(
+                            session,
+                            session_turn_progress,
+                            session_turn_counts.get(session, 0),
+                        )
                     else:
-                        skipped_dialogues += 1
                         continue
                 elif should_process:
-                    print(f"\n[{session.upper()}] Processing session...")
-                    print(f"  Time: {session_time}")
+                    print(f"\n[{session.upper()}] Processing session...", flush=True)
+                    self._print_session_progress(
+                        session,
+                        session_turn_progress,
+                        session_turn_counts.get(session, 0),
+                    )
             
             # Skip if we haven't reached the start session yet
             if not should_process:
-                skipped_dialogues += 1
                 continue
             
             session_dialogues.append(dialogue)
             total_dialogues += 1
             cumulative_dialogue_count += 1
-            
-            # Skip if no facts
-            if not facts:
-                continue
             
             # Build previous context (previous dialogue in same session)
             previous_context = ""
@@ -319,13 +332,21 @@ Extract metadata for this fact.
                 if result["action"] != "IGNORE":
                     existing_facts.append(fact_tuple)
                     total_facts_processed += 1
-                    
-                    # Print progress every 50 facts
-                    if total_facts_processed % 50 == 0:
-                        print(f"  → Processed {total_facts_processed} facts...")
+
+            session_turn_progress += 1
+            self._print_session_progress(
+                session,
+                session_turn_progress,
+                session_turn_counts.get(session, session_turn_progress),
+            )
 
         # Record snapshot for the final session
         if current_session is not None and should_process:
+            self._finish_session_progress(
+                current_session,
+                session_turn_progress,
+                session_turn_counts.get(current_session, session_turn_progress),
+            )
             stored_facts = self.fact_storage.storage.load_facts()
             stored_events = self.fact_storage.storage.load_events()
             stored_profiles = self.fact_storage.storage.load_profiles()
@@ -338,25 +359,11 @@ Extract metadata for this fact.
                 "elapsed_seconds": time.time() - start_time,
             })
         
-        # Force extract remaining pending profiles
-        print(f"\nFinalizing: Extracting remaining pending profiles...")
         self.fact_storage.force_profile_extraction()
         
         end_time = time.time()
         runtime = end_time - start_time
-        
-        print(f"\n{'='*60}")
-        print(f"PHASE 1 COMPLETE")
-        print(f"{'='*60}")
-        if start_session:
-            print(f"Skipped dialogues: {skipped_dialogues}")
-        print(f"Total dialogues processed: {total_dialogues}")
-        print(f"Total facts processed: {total_facts_processed}")
-        print(f"Runtime: {runtime:.2f}s")
-        
-        # Print LLM statistics
-        self.llm.print_statistics()
-        
+
         return {
             "runtime": runtime,
             "total_dialogues": total_dialogues,
