@@ -60,7 +60,6 @@ def _early_dry_run_if_requested() -> None:
     parser.add_argument("--extract-facts", action="store_true")
     parser.add_argument("--output-dir", default="runs/atommem")
     parser.add_argument("--disable-graph", action="store_true")
-    parser.add_argument("--disable-evidence-summary", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args, _unknown = parser.parse_known_args()
 
@@ -77,7 +76,6 @@ def _early_dry_run_if_requested() -> None:
     print(f"Facts file:          {facts_file or '(will extract)' if args.extract_facts else facts_file}")
     print(f"Output directory:    {Path(args.output_dir).resolve()}")
     print(f"Graph retrieval:     {'disabled' if args.disable_graph else 'enabled'}")
-    print(f"Evidence summary:    {'disabled' if args.disable_evidence_summary else 'enabled'}")
     print()
 
     if args.data_file and not Path(args.data_file).exists():
@@ -94,7 +92,7 @@ _early_dry_run_if_requested()
 
 from atommem_core.graph_rerank import RerankGraphConfig, SeedOnlyGraphReranker  # noqa: E402
 from atommem_core.incremental_temporal_profile import (  # noqa: E402
-    IncrementalTemporalProfilePipelineTester,
+    IncrementalTemporalProfilePipeline,
     IncrementalTemporalProfileQueryResponder,
 )
 from atommem_core.multichannel_graph import MultiChannelFactGraphIndex  # noqa: E402
@@ -104,20 +102,20 @@ from src.llm_interface import LLMInterface  # noqa: E402
 from src.retrieval import LayeredRetriever  # noqa: E402
 
 
-class FactExecutor:
+class FactExtractor:
     """OpenAI-compatible atomic fact extractor for raw conversation files."""
 
     def __init__(self) -> None:
-        if not config.FACT_EXECUTOR_API_KEY:
+        if not config.FACT_EXTRACTOR_API_KEY:
             raise ValueError(
-                "Missing ATOMMEM_FACT_EXECUTOR_API_KEY/ATOMMEM_API_KEY. "
+                "Missing ATOMMEM_FACT_EXTRACTOR_API_KEY/ATOMMEM_API_KEY. "
                 "Set it in .env or pass a pre-extracted --facts-file."
             )
         self.client = OpenAI(
-            api_key=config.FACT_EXECUTOR_API_KEY,
-            base_url=config.FACT_EXECUTOR_API_BASE,
+            api_key=config.FACT_EXTRACTOR_API_KEY,
+            base_url=config.FACT_EXTRACTOR_API_BASE,
         )
-        self.model = config.FACT_EXECUTOR_MODEL
+        self.model = config.FACT_EXTRACTOR_MODEL
         self.system_prompt = (
             "You extract high-value factual information from conversation turns. "
             "Return only a JSON array of complete standalone factual statements."
@@ -221,7 +219,7 @@ def extract_facts_from_split_sample(
     start_session: int = 1,
     end_session: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    extractor = FactExecutor()
+    extractor = FactExtractor()
     data_path = Path(data_file)
     data = json.loads(data_path.read_text(encoding="utf-8"))
     conversation = data.get("conversation", data)
@@ -243,7 +241,7 @@ def extract_facts_from_split_sample(
     for session_key in session_keys:
         dialogues = conversation.get(session_key, [])
         session_time = conversation.get(f"{session_key}_date_time", "")
-        print(f"[fact-executor] {session_key}: {len(dialogues)} turns")
+        print(f"[fact-extractor] {session_key}: {len(dialogues)} turns")
         for index, dialogue in enumerate(dialogues):
             previous = dialogues[index - 1] if index > 0 else None
             facts = extractor.extract_turn(dialogue, previous, session_time)
@@ -275,7 +273,7 @@ def extract_facts_from_split_sample(
     out_path = Path(output_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[fact-executor] saved {total_facts} facts to {out_path}")
+    print(f"[fact-extractor] saved {total_facts} facts to {out_path}")
     extractor.stats["total_tokens_k"] = round(extractor.stats["total_tokens"] / 1000, 2)
     return str(out_path), extractor.stats
 
@@ -289,17 +287,15 @@ class AtomMemGraphQueryResponder(IncrementalTemporalProfileQueryResponder):
         llm: Optional[LLMInterface] = None,
         enable_graph: bool = True,
         final_top_k: int = config.GRAPH_FINAL_TOP_K,
-        disable_evidence_summary: bool = False,
     ) -> None:
         super().__init__(conversation_id, llm=llm)
         self.enable_graph = enable_graph
         self.final_top_k = final_top_k
-        self.disable_evidence_summary = disable_evidence_summary
         self.base_retriever = LayeredRetriever()
 
-    def answer_query(self, query: str) -> Dict[str, Any]:
+    def answer_query(self, query: str, category: Any = None) -> Dict[str, Any]:
         query_info, latency = self.prepare_query_info(query)
-        return self.answer_query_with_query_info(query, query_info, shared_latency=latency)
+        return self.answer_query_with_query_info(query, query_info, shared_latency=latency, category=category)
 
     def prepare_query_info(self, query: str) -> Tuple[Dict[str, Any], Dict[str, float]]:
         latency: Dict[str, float] = {}
@@ -318,6 +314,7 @@ class AtomMemGraphQueryResponder(IncrementalTemporalProfileQueryResponder):
         query: str,
         query_info: Dict[str, Any],
         shared_latency: Optional[Dict[str, float]] = None,
+        category: Any = None,
     ) -> Dict[str, Any]:
         latency = dict(shared_latency or {})
         run_query_info = copy.deepcopy(query_info)
@@ -369,26 +366,13 @@ class AtomMemGraphQueryResponder(IncrementalTemporalProfileQueryResponder):
         latency["retrieval_ms"] = (time.time() - start) * 1000
 
         start = time.time()
-        if self.disable_evidence_summary:
-            evidence_summary = self._fallback_evidence_summary(final_facts, final_profiles)
-        else:
-            evidence_summary = self._summarize_retrieved_evidence(
-                query,
-            run_query_info,
-            final_facts,
-            final_profiles,
-        )
-        evidence_summary["graph_debug"] = graph_debug
-        latency["evidence_summary_ms"] = (time.time() - start) * 1000
-
-        start = time.time()
         answer = self._generate_answer(
             query,
             final_facts,
             final_profiles,
             event_contexts,
             query_info=run_query_info,
-            evidence_summary=evidence_summary,
+            category=category,
         )
         latency["answer_generation_ms"] = (time.time() - start) * 1000
 
@@ -399,11 +383,8 @@ class AtomMemGraphQueryResponder(IncrementalTemporalProfileQueryResponder):
             "retrieved_facts": final_facts,
             "retrieved_profiles": final_profiles,
             "event_contexts": event_contexts,
-            "evidence_summary": evidence_summary,
             "graph_debug": graph_debug,
             "retrieval_rounds": 1,
-            "no_useful_retrieval_rounds": 0,
-            "stopped_for_insufficient_evidence": False,
             "query_info": {
                 "need_specific": run_query_info.get("need_specific", True),
                 "need_attribute": run_query_info.get("need_attribute", False),
@@ -445,7 +426,7 @@ class AtomMemGraphQueryResponder(IncrementalTemporalProfileQueryResponder):
         return normalized or None
 
 
-class AtomMemPipelineTester(IncrementalTemporalProfilePipelineTester):
+class AtomMemPipeline(IncrementalTemporalProfilePipeline):
     """Memory builder plus tuned entity/event/turn graph QA."""
 
     def __init__(
@@ -456,7 +437,6 @@ class AtomMemPipelineTester(IncrementalTemporalProfilePipelineTester):
         min_profile_llm_score: float,
         enable_graph: bool,
         final_top_k: int,
-        disable_evidence_summary: bool,
     ) -> None:
         super().__init__(
             conversation_id=conversation_id,
@@ -469,10 +449,7 @@ class AtomMemPipelineTester(IncrementalTemporalProfilePipelineTester):
             llm=self.llm,
             enable_graph=enable_graph,
             final_top_k=final_top_k,
-            disable_evidence_summary=disable_evidence_summary,
         )
-        mode = "entity/event/turn graph rerank" if enable_graph else "no graph"
-        print(f"-> QA retrieval mode: {mode}; final_top_k={final_top_k}")
 
 
 def configure_runtime_paths(output_dir: str) -> None:
@@ -494,43 +471,8 @@ def load_question_items(data_file: str) -> List[Dict[str, Any]]:
     return []
 
 
-def extract_selected_evidence(
-    evidence_summary: Dict[str, Any],
-    retrieved_facts: List[Dict[str, Any]],
-    retrieved_profiles: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    fact_ids = evidence_summary.get("useful_fact_ids", evidence_summary.get("supporting_fact_ids", [])) or []
-    profile_ids = evidence_summary.get("useful_profile_ids", evidence_summary.get("supporting_profile_ids", [])) or []
-    fact_lookup = {fact.get("fact_id"): fact for fact in retrieved_facts if fact.get("fact_id")}
-    profile_lookup = {profile.get("profile_id"): profile for profile in retrieved_profiles if profile.get("profile_id")}
-    return {
-        "facts": [
-            {
-                "fact_id": fact_id,
-                "fact": fact_lookup.get(fact_id, {}).get("fact", ""),
-                "recorded_date": (
-                    fact_lookup.get(fact_id, {}).get("time", ["", ""])[1]
-                    if isinstance(fact_lookup.get(fact_id, {}).get("time"), list)
-                    and len(fact_lookup.get(fact_id, {}).get("time", [])) > 1
-                    else ""
-                ),
-            }
-            for fact_id in fact_ids
-            if fact_id in fact_lookup
-        ],
-        "profiles": [
-            {
-                "profile_id": profile_id,
-                "content": profile_lookup.get(profile_id, {}).get("content", ""),
-            }
-            for profile_id in profile_ids
-            if profile_id in profile_lookup
-        ],
-    }
-
-
 def answer_question_items(
-    tester: AtomMemPipelineTester,
+    memory_pipeline: AtomMemPipeline,
     question_items: List[Dict[str, Any]],
     output_dir: str,
 ) -> Dict[str, Any]:
@@ -541,10 +483,9 @@ def answer_question_items(
         if not question:
             continue
         print(f"[Q{index}/{len(question_items)}] {question}")
-        response = tester.query_responder.answer_query(str(question))
+        response = memory_pipeline.query_responder.answer_query(str(question), category=item.get("category"))
         retrieved_facts = response.get("retrieved_facts", [])
         retrieved_profiles = response.get("retrieved_profiles", [])
-        evidence_summary = response.get("evidence_summary", {})
         source_metadata = {
             key: value
             for key, value in item.items()
@@ -559,8 +500,6 @@ def answer_question_items(
             "retrieved_fact_ids": [fact.get("fact_id") for fact in retrieved_facts if fact.get("fact_id")],
             "retrieved_source_ids": [fact.get("dia_id") for fact in retrieved_facts if fact.get("dia_id")],
             "retrieved_profile_ids": [profile.get("profile_id") for profile in retrieved_profiles if profile.get("profile_id")],
-            "selected_evidence": extract_selected_evidence(evidence_summary, retrieved_facts, retrieved_profiles),
-            "evidence_summary": evidence_summary,
             "graph_debug": response.get("graph_debug", {}),
             "latency_breakdown": response.get("latency_breakdown", {}),
         })
@@ -570,9 +509,9 @@ def answer_question_items(
         "runtime": time.time() - start,
         "results": results,
     }
-    out_path = Path(output_dir) / f"qa_predictions_{tester.conversation_id}.json"
+    out_path = Path(output_dir) / f"qa_predictions_{memory_pipeline.conversation_id}.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    jsonl_path = Path(output_dir) / f"qa_predictions_{tester.conversation_id}.jsonl"
+    jsonl_path = Path(output_dir) / f"qa_predictions_{memory_pipeline.conversation_id}.jsonl"
     with jsonl_path.open("w", encoding="utf-8") as f:
         for row in results:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -617,7 +556,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true", help="Reuse existing memory files in --output-dir")
     parser.add_argument("--skip-qa", action="store_true", help="Build memory only")
     parser.add_argument("--disable-graph", action="store_true", help="Use no-graph seed retrieval for QA")
-    parser.add_argument("--disable-evidence-summary", action="store_true", help="Send retrieved facts/profiles directly to answer generation")
     parser.add_argument("--final-top-k", type=int, default=config.GRAPH_FINAL_TOP_K, help="Number of final facts sent to answer generation")
     parser.add_argument("--profile-top-k", type=int, default=config.PROFILE_TEMPORAL_TOP_K)
     parser.add_argument("--min-profile-llm-score", type=float, default=config.PROFILE_TEMPORAL_MIN_LLM_SCORE)
@@ -646,7 +584,6 @@ def main() -> None:
     print(f"Facts file:          {facts_file or '(will extract)' if args.extract_facts else facts_file}")
     print(f"Output directory:    {Path(args.output_dir).resolve()}")
     print(f"Graph retrieval:     {'disabled' if args.disable_graph else 'enabled'}")
-    print(f"Evidence summary:    {'disabled' if args.disable_evidence_summary else 'enabled'}")
     print()
 
     if args.dry_run:
@@ -680,22 +617,21 @@ def main() -> None:
                 end_session=args.fact_end_session,
             )
 
-    tester = AtomMemPipelineTester(
+    memory_pipeline = AtomMemPipeline(
         conversation_id=eval_conv_id,
         output_dir=args.output_dir,
         profile_top_k=args.profile_top_k,
         min_profile_llm_score=args.min_profile_llm_score,
         enable_graph=not args.disable_graph,
         final_top_k=args.final_top_k,
-        disable_evidence_summary=args.disable_evidence_summary,
     )
 
     if not args.skip_build:
-        _metadata, dialogue_results = tester.load_preextracted_facts(facts_file)
-        tester.process_all_facts(dialogue_results, start_session=args.start_session)
+        _metadata, dialogue_results = memory_pipeline.load_preextracted_facts(facts_file)
+        memory_pipeline.process_all_facts(dialogue_results, start_session=args.start_session)
     else:
         print("PHASE 1: skipped; using existing memory files.")
-        tester.save_memory_snapshot()
+        memory_pipeline.save_memory_snapshot()
 
     if not args.skip_qa:
         question_file = args.questions_file or data_file
@@ -704,13 +640,13 @@ def main() -> None:
         else:
             question_items = load_question_items(question_file)
             if question_items:
-                answer_question_items(tester, question_items, args.output_dir)
+                answer_question_items(memory_pipeline, question_items, args.output_dir)
             else:
                 print("PHASE 2: skipped; no question/query items found.")
     else:
         print("PHASE 2: skipped.")
 
-    stats = tester.get_aggregate_llm_statistics()
+    stats = memory_pipeline.get_aggregate_llm_statistics()
     if fact_extraction_stats:
         stats = merge_llm_stats(stats, fact_extraction_stats)
     total_runtime = time.time() - total_start

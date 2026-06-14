@@ -8,17 +8,16 @@ evidence matching, and answer metrics.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +50,8 @@ DEFAULT_CATEGORIES = {1, 2, 3, 4}
 RETRIEVAL_K = 10
 DEFAULT_JUDGE_MODEL = "deepseek-v4-pro"
 DEFAULT_JUDGE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+CHECKPOINT_VERSION = 1
+TOKEN_STAT_KEYS = ("calls", "total_tokens", "prompt_tokens", "completion_tokens")
 
 
 def env_or_default(name: str, default: str) -> str:
@@ -61,16 +62,14 @@ def env_or_default(name: str, default: str) -> str:
 def load_pipeline_components() -> Dict[str, Any]:
     """Import the full pipeline lazily so help/config parsing stays lightweight."""
     from run_atommem_pipeline import (  # noqa: WPS433
-        AtomMemPipelineTester,
+        AtomMemPipeline,
         configure_runtime_paths,
-        merge_llm_stats,
         print_token_report,
     )
 
     return {
-        "tester_cls": AtomMemPipelineTester,
+        "pipeline_cls": AtomMemPipeline,
         "configure_runtime_paths": configure_runtime_paths,
-        "merge_llm_stats": merge_llm_stats,
         "print_token_report": print_token_report,
     }
 
@@ -227,17 +226,37 @@ def add_usage_to_stats(stats: Dict[str, Any], usage: Optional[Dict[str, Any]], c
     stats["total_tokens_k"] = round(stats.get("total_tokens", 0) / 1000, 2)
 
 
-def merge_stats_in_place(target: Dict[str, Any], source: Dict[str, Any]) -> None:
-    for key in ("calls", "total_tokens", "prompt_tokens", "completion_tokens"):
-        target[key] = target.get(key, 0) + source.get(key, 0)
-    target["total_tokens_k"] = round(target.get("total_tokens", 0) / 1000, 2)
+def empty_token_stats() -> Dict[str, Any]:
+    return {
+        "calls": 0,
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens_k": 0.0,
+    }
 
 
-@contextlib.contextmanager
-def suppress_pipeline_stdout() -> Iterable[None]:
-    """Hide verbose memory-build logs while keeping evaluation progress concise."""
-    with contextlib.redirect_stdout(io.StringIO()):
-        yield
+def normalize_token_stats(stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    normalized = empty_token_stats()
+    if isinstance(stats, dict):
+        for key in TOKEN_STAT_KEYS:
+            normalized[key] = int(stats.get(key, 0) or 0)
+    normalized["total_tokens_k"] = round(normalized["total_tokens"] / 1000, 2)
+    return normalized
+
+
+def add_token_stats_in_place(stats: Dict[str, Any], increment: Dict[str, Any]) -> None:
+    for key in TOKEN_STAT_KEYS:
+        stats[key] = int(stats.get(key, 0) or 0) + int(increment.get(key, 0) or 0)
+    stats["total_tokens_k"] = round(stats.get("total_tokens", 0) / 1000, 2)
+
+
+def token_stats_delta(current: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
+    delta = empty_token_stats()
+    for key in TOKEN_STAT_KEYS:
+        delta[key] = max(0, int(current.get(key, 0) or 0) - int(previous.get(key, 0) or 0))
+    delta["total_tokens_k"] = round(delta["total_tokens"] / 1000, 2)
+    return delta
 
 
 class LLMJudge:
@@ -290,23 +309,25 @@ class LLMJudge:
 
 
 def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
-def append_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            f.flush()
-
-
-def load_qa_items(data_file: Path, categories: Set[int], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def load_qa_items(data_file: Path, categories: Set[int]) -> List[Dict[str, Any]]:
     data = load_json(data_file)
     raw_items = data.get("qa", []) if isinstance(data, dict) else []
     items: List[Dict[str, Any]] = []
@@ -319,8 +340,6 @@ def load_qa_items(data_file: Path, categories: Set[int], limit: Optional[int] = 
         qa = dict(item)
         qa.setdefault("question_id", index)
         items.append(qa)
-        if limit is not None and len(items) >= limit:
-            break
     return items
 
 
@@ -329,7 +348,6 @@ def discover_cases(
     data_dir: Path,
     conv_ids: Optional[Set[str]] = None,
     categories: Optional[Set[int]] = None,
-    limit_per_conv: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     categories = categories or DEFAULT_CATEGORIES
     fact_files = sorted(facts_dir.glob("conv-*.json"))
@@ -341,7 +359,7 @@ def discover_cases(
         data_file = data_dir / f"{conv_id}.json"
         if not data_file.exists():
             raise FileNotFoundError(f"Missing LoCoMo QA file for {conv_id}: {data_file}")
-        qa_items = load_qa_items(data_file, categories, limit=limit_per_conv)
+        qa_items = load_qa_items(data_file, categories)
         cases.append({
             "conv_id": conv_id,
             "facts_file": facts_file,
@@ -362,8 +380,14 @@ def memory_files(output_dir: Path, eval_conv_id: str) -> List[Path]:
     ]
 
 
-def memory_ready(output_dir: Path, eval_conv_id: str) -> bool:
-    facts_file, events_file, profiles_file, _graph_file = memory_files(output_dir, eval_conv_id)
+def memory_complete_file(output_dir: Path, eval_conv_id: str) -> Path:
+    return output_dir / f"memory_complete_{eval_conv_id}.json"
+
+
+def memory_storage_ready(output_dir: Path, eval_conv_id: str) -> bool:
+    facts_file = output_dir / f"facts_{eval_conv_id}.json"
+    events_file = output_dir / f"events_{eval_conv_id}.json"
+    profiles_file = output_dir / f"profiles_{eval_conv_id}.json"
     if not (facts_file.exists() and events_file.exists() and profiles_file.exists()):
         return False
     try:
@@ -374,15 +398,213 @@ def memory_ready(output_dir: Path, eval_conv_id: str) -> bool:
     return isinstance(facts, list) and bool(facts)
 
 
+def last_source_dia_id_with_facts(facts_file: Path) -> Optional[str]:
+    data = load_json(facts_file)
+    results = data.get("results", []) if isinstance(data, dict) else []
+    for item in reversed(results):
+        if isinstance(item, dict) and item.get("facts") and item.get("dia_id"):
+            return str(item["dia_id"])
+    return None
+
+
+def legacy_memory_covers_source(output_dir: Path, eval_conv_id: str, facts_file: Path) -> bool:
+    expected_last_dia_id = last_source_dia_id_with_facts(facts_file)
+    if not expected_last_dia_id:
+        return False
+    facts_path = output_dir / f"facts_{eval_conv_id}.json"
+    try:
+        facts_data = load_json(facts_path)
+    except json.JSONDecodeError:
+        return False
+    stored_facts = facts_data.get("facts", []) if isinstance(facts_data, dict) else facts_data
+    if not isinstance(stored_facts, list):
+        return False
+    return any(isinstance(fact, dict) and fact.get("dia_id") == expected_last_dia_id for fact in stored_facts)
+
+
+def mark_memory_complete(output_dir: Path, eval_conv_id: str, facts_file: Path, source: str) -> Dict[str, Any]:
+    marker = {
+        "eval_conv_id": eval_conv_id,
+        "facts_file": str(facts_file),
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source": source,
+    }
+    save_json(memory_complete_file(output_dir, eval_conv_id), marker)
+    return marker
+
+
+def memory_ready(output_dir: Path, eval_conv_id: str, facts_file: Path) -> bool:
+    if not memory_storage_ready(output_dir, eval_conv_id):
+        return False
+    marker_file = memory_complete_file(output_dir, eval_conv_id)
+    if marker_file.exists():
+        return True
+    if legacy_memory_covers_source(output_dir, eval_conv_id, facts_file):
+        mark_memory_complete(output_dir, eval_conv_id, facts_file, source="legacy")
+        return True
+    return False
+
+
 def clear_memory(output_dir: Path, eval_conv_id: str) -> None:
     output_root = output_dir.resolve()
-    for path in memory_files(output_dir, eval_conv_id):
+    for path in [*memory_files(output_dir, eval_conv_id), memory_complete_file(output_dir, eval_conv_id)]:
         if not path.exists():
             continue
         resolved = path.resolve()
         if not str(resolved).lower().startswith(str(output_root).lower()):
             raise RuntimeError(f"Refusing to remove outside output directory: {resolved}")
         resolved.unlink()
+
+
+def question_key(conv_id: str, question_id: Any) -> str:
+    return f"{conv_id}::{question_id}"
+
+
+def record_key(record: Dict[str, Any]) -> str:
+    return question_key(str(record.get("conv_id", "")), record.get("question_id"))
+
+
+def dedupe_records(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        if isinstance(record, dict):
+            by_key[record_key(record)] = record
+    return list(by_key.values())
+
+
+def build_settings(
+    args: argparse.Namespace,
+    data_dir: Path,
+    facts_dir: Path,
+    categories: Set[int],
+    cases: Sequence[Dict[str, Any]],
+    judge_model: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "data_dir": str(data_dir),
+        "facts_dir": str(facts_dir),
+        "output_dir": str(Path(args.output_dir).resolve()),
+        "categories": sorted(categories),
+        "case_ids": [case["conv_id"] for case in cases],
+        "retrieval_k": RETRIEVAL_K,
+        "graph_enabled": True,
+        "judge_enabled": not args.skip_judge,
+        "judge_model": None if args.skip_judge else judge_model,
+    }
+
+
+def checkpoint_file(output_dir: Path) -> Path:
+    return output_dir / "locomo_eval_checkpoint.json"
+
+
+def checkpoint_backup_file(output_dir: Path) -> Path:
+    return output_dir / "locomo_eval_checkpoint.json.bak"
+
+
+def new_checkpoint(settings: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "version": CHECKPOINT_VERSION,
+        "settings": settings,
+        "records": [],
+        "token_usage": empty_token_stats(),
+        "judge_token_usage": empty_token_stats(),
+        "token_usage_by_conversation": {},
+        "completed_memory": {},
+        "completed": False,
+        "updated_at": None,
+    }
+
+
+def normalize_checkpoint(data: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    checkpoint = new_checkpoint(settings)
+    checkpoint["records"] = dedupe_records(data.get("records", []))
+    checkpoint["token_usage"] = normalize_token_stats(data.get("token_usage"))
+    checkpoint["judge_token_usage"] = normalize_token_stats(data.get("judge_token_usage"))
+    raw_by_conv = data.get("token_usage_by_conversation", {})
+    if isinstance(raw_by_conv, dict):
+        checkpoint["token_usage_by_conversation"] = {
+            str(conv_id): normalize_token_stats(stats)
+            for conv_id, stats in raw_by_conv.items()
+            if isinstance(stats, dict)
+        }
+    raw_memory = data.get("completed_memory", {})
+    checkpoint["completed_memory"] = raw_memory if isinstance(raw_memory, dict) else {}
+    checkpoint["completed"] = bool(data.get("completed", False))
+    checkpoint["updated_at"] = data.get("updated_at")
+    return checkpoint
+
+
+def checkpoint_from_results(results_payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    checkpoint = new_checkpoint(settings)
+    checkpoint["records"] = dedupe_records(results_payload.get("results", []))
+    checkpoint["token_usage"] = normalize_token_stats(results_payload.get("token_usage"))
+    checkpoint["judge_token_usage"] = normalize_token_stats(results_payload.get("judge_token_usage"))
+    raw_by_conv = results_payload.get("token_usage_by_conversation", {})
+    if isinstance(raw_by_conv, dict):
+        checkpoint["token_usage_by_conversation"] = {
+            str(conv_id): normalize_token_stats(stats)
+            for conv_id, stats in raw_by_conv.items()
+            if isinstance(stats, dict)
+        }
+    checkpoint["completed"] = True
+    return checkpoint
+
+
+def load_checkpoint(output_dir: Path, settings: Dict[str, Any]) -> Dict[str, Any]:
+    for path in (checkpoint_file(output_dir), checkpoint_backup_file(output_dir)):
+        if not path.exists():
+            continue
+        try:
+            data = load_json(path)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        if isinstance(data, dict) and data.get("version") == CHECKPOINT_VERSION and data.get("settings") == settings:
+            if path == checkpoint_backup_file(output_dir):
+                print(f"Recovered checkpoint from backup: {path}")
+            return normalize_checkpoint(data, settings)
+        print(f"Ignoring incompatible checkpoint: {path}")
+
+    results_path = output_dir / "locomo_eval_results.json"
+    if results_path.exists():
+        try:
+            results_payload = load_json(results_path)
+        except json.JSONDecodeError:
+            results_payload = None
+        if isinstance(results_payload, dict) and results_payload.get("settings") == settings:
+            return checkpoint_from_results(results_payload, settings)
+
+    return new_checkpoint(settings)
+
+
+def save_checkpoint(output_dir: Path, checkpoint: Dict[str, Any]) -> None:
+    checkpoint["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    path = checkpoint_file(output_dir)
+    backup_path = checkpoint_backup_file(output_dir)
+    if path.exists():
+        try:
+            current = load_json(path)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            current = None
+        if isinstance(current, dict) and current.get("version") == CHECKPOINT_VERSION:
+            shutil.copy2(path, backup_path)
+    save_json(path, checkpoint)
+
+
+def completed_question_keys(checkpoint: Dict[str, Any]) -> Set[str]:
+    return {record_key(record) for record in checkpoint.get("records", []) if isinstance(record, dict)}
+
+
+def add_pipeline_delta(
+    memory_pipeline: Any,
+    previous_stats: Dict[str, Any],
+    aggregate_token_stats: Dict[str, Any],
+    case_token_stats: Dict[str, Any],
+) -> Dict[str, Any]:
+    current_stats = normalize_token_stats(memory_pipeline.get_aggregate_llm_statistics())
+    delta = token_stats_delta(current_stats, previous_stats)
+    add_token_stats_in_place(aggregate_token_stats, delta)
+    add_token_stats_in_place(case_token_stats, delta)
+    return current_stats
 
 
 def retrieved_dia_ids(response: Dict[str, Any]) -> List[str]:
@@ -399,13 +621,6 @@ def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         return sum(values) / len(values) if values else 0.0
 
     def summarize_subset(subset: List[Dict[str, Any]]) -> Dict[str, Any]:
-        total_hits = 0
-        total_gold = 0
-        for row in subset:
-            gold = [item for item in row.get("gold_evidence", []) or [] if item]
-            retrieved = set(row.get("retrieved_dia_ids_at_10", []) or [])
-            total_gold += len(gold)
-            total_hits += sum(1 for item in gold if item in retrieved)
         judged = [row for row in subset if row.get("llm_judge_label") in {"CORRECT", "WRONG"}]
         correct_judgments = sum(1 for row in judged if row.get("llm_judge_label") == "CORRECT")
         return {
@@ -484,41 +699,77 @@ def run_case(
     pipeline: Dict[str, Any],
     judge: Optional[LLMJudge],
     judge_token_stats: Dict[str, Any],
+    per_case_token_stats: Dict[str, Any],
+    checkpoint: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     conv_id = case["conv_id"]
     eval_conv_id = f"{conv_id}-locomo-atommem"
     output_dir = Path(args.output_dir).resolve()
 
-    if not args.reuse_memory:
+    completed_keys = completed_question_keys(checkpoint)
+    remaining_items = [
+        qa for qa in case["qa_items"]
+        if question_key(conv_id, qa.get("question_id")) not in completed_keys
+    ]
+    case_token_stats = normalize_token_stats(per_case_token_stats.get(conv_id))
+    per_case_token_stats[conv_id] = case_token_stats
+
+    if not remaining_items:
+        print(f"[{conv_id}] All {len(case['qa_items'])} QA items already checkpointed; skipping")
+        return [], case_token_stats
+
+    is_memory_ready = memory_ready(output_dir, eval_conv_id, case["facts_file"])
+    if not args.reuse_memory or (args.reuse_memory and not is_memory_ready):
         clear_memory(output_dir, eval_conv_id)
+        checkpoint.setdefault("completed_memory", {}).pop(eval_conv_id, None)
 
-    with suppress_pipeline_stdout():
-        tester = pipeline["tester_cls"](
-            conversation_id=eval_conv_id,
-            output_dir=str(output_dir),
-            profile_top_k=args.profile_top_k,
-            min_profile_llm_score=args.min_profile_llm_score,
-            enable_graph=not args.disable_graph,
-            final_top_k=RETRIEVAL_K,
-            disable_evidence_summary=args.disable_evidence_summary,
-        )
+    memory_pipeline = pipeline["pipeline_cls"](
+        conversation_id=eval_conv_id,
+        output_dir=str(output_dir),
+        profile_top_k=config.PROFILE_TEMPORAL_TOP_K,
+        min_profile_llm_score=config.PROFILE_TEMPORAL_MIN_LLM_SCORE,
+        enable_graph=True,
+        final_top_k=RETRIEVAL_K,
+    )
+    last_pipeline_stats = empty_token_stats()
 
-    if args.reuse_memory and memory_ready(output_dir, eval_conv_id):
+    if args.reuse_memory and is_memory_ready:
         print(f"[{conv_id}] Reusing existing memory: {eval_conv_id}")
+        marker_file = memory_complete_file(output_dir, eval_conv_id)
+        if marker_file.exists():
+            checkpoint.setdefault("completed_memory", {})[eval_conv_id] = load_json(marker_file)
+            save_checkpoint(output_dir, checkpoint)
     else:
         print(f"[{conv_id}] Building memory from {case['facts_file']}")
-        with suppress_pipeline_stdout():
-            _metadata, dialogue_results = tester.load_preextracted_facts(str(case["facts_file"]))
-            tester.process_all_facts(dialogue_results)
+        _metadata, dialogue_results = memory_pipeline.load_preextracted_facts(str(case["facts_file"]))
+        memory_pipeline.process_all_facts(dialogue_results)
+        last_pipeline_stats = add_pipeline_delta(
+            memory_pipeline,
+            last_pipeline_stats,
+            aggregate_token_stats,
+            case_token_stats,
+        )
+        checkpoint.setdefault("completed_memory", {})[eval_conv_id] = mark_memory_complete(
+            output_dir,
+            eval_conv_id,
+            case["facts_file"],
+            source="build",
+        )
+        checkpoint["token_usage"] = aggregate_token_stats
+        checkpoint["judge_token_usage"] = judge_token_stats
+        checkpoint["token_usage_by_conversation"] = per_case_token_stats
+        save_checkpoint(output_dir, checkpoint)
         print(f"[{conv_id}] Memory build complete")
 
     records: List[Dict[str, Any]] = []
-    jsonl_path = output_dir / "locomo_eval_predictions.jsonl"
     for index, qa in enumerate(case["qa_items"], 1):
+        q_key = question_key(conv_id, qa.get("question_id"))
+        if q_key in completed_keys:
+            continue
         question = str(qa.get("question", ""))
         print(f"[{conv_id} Q{index}/{len(case['qa_items'])}] {question}")
         start = time.time()
-        response = tester.query_responder.answer_query(question)
+        response = memory_pipeline.query_responder.answer_query(question, category=qa.get("category"))
         answer = response.get("answer", "")
         retrieved = retrieved_dia_ids(response)
         gold = [item for item in qa.get("evidence", []) or [] if item]
@@ -547,16 +798,25 @@ def run_case(
             add_usage_to_stats(judge_token_stats, judge_fields.get("usage"), count_call=True)
             add_usage_to_stats(aggregate_token_stats, judge_fields.get("usage"), count_call=True)
         records.append(record)
-        append_jsonl(jsonl_path, [record])
+        checkpoint["records"].append(record)
+        completed_keys.add(q_key)
+        last_pipeline_stats = add_pipeline_delta(
+            memory_pipeline,
+            last_pipeline_stats,
+            aggregate_token_stats,
+            case_token_stats,
+        )
+        checkpoint["token_usage"] = aggregate_token_stats
+        checkpoint["judge_token_usage"] = judge_token_stats
+        checkpoint["token_usage_by_conversation"] = per_case_token_stats
+        save_checkpoint(output_dir, checkpoint)
         judge_label = record.get("llm_judge_label", "SKIPPED")
         print(
             f"  F1={record['f1']:.4f} BLEU1={record['bleu1']:.4f} "
             f"R@10={record['recall_at_10']:.4f} J={judge_label}"
         )
 
-    case_stats = tester.get_aggregate_llm_statistics()
-    aggregate_token_stats.update(pipeline["merge_llm_stats"](aggregate_token_stats, case_stats))
-    return records, case_stats
+    return records, case_token_stats
 
 
 def parse_conv_ids(values: Optional[List[str]]) -> Optional[Set[str]]:
@@ -570,12 +830,6 @@ def parse_conv_ids(values: Optional[List[str]]) -> Optional[Set[str]]:
     return conv_ids
 
 
-def parse_categories(args: argparse.Namespace) -> Set[int]:
-    if args.include_category5:
-        return {1, 2, 3, 4, 5}
-    return set(args.categories)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build AtomMem and evaluate LoCoMo QA in one command.")
     parser.add_argument("--data-dir", default=str(default_data_dir()), help="Directory containing conv-*.json LoCoMo files")
@@ -583,20 +837,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(REPO_ROOT / "runs" / "locomo_eval"), help="Evaluation output directory")
     parser.add_argument("--conv-ids", nargs="*", default=None, help="Optional subset, e.g. conv-26 conv-49 or conv-26,conv-49")
     parser.add_argument("--categories", nargs="*", type=int, default=sorted(DEFAULT_CATEGORIES), help="Question categories to evaluate")
-    parser.add_argument("--include-category5", action="store_true", help="Also evaluate category 5 questions")
-    parser.add_argument("--limit-per-conv", type=int, default=None, help="Debug limit for QA items per conversation")
     parser.add_argument("--reuse-memory", action="store_true", help="Reuse existing memory files in --output-dir instead of rebuilding")
-    parser.add_argument("--disable-graph", action="store_true", help="Disable entity/event/turn graph reranking")
-    parser.add_argument("--disable-evidence-summary", action="store_true", help="Answer directly with retrieved facts/profiles")
     parser.add_argument("--skip-judge", action="store_true", help="Skip LLM-as-a-Judge scoring")
-    parser.add_argument("--judge-prompt-file", default=str(REPO_ROOT / "prompts" / "judge_prompt.txt"))
-    parser.add_argument("--judge-model", default=env_or_default("ATOMMEM_JUDGE_MODEL", DEFAULT_JUDGE_MODEL))
-    parser.add_argument("--judge-api-base", default=env_or_default("ATOMMEM_JUDGE_API_BASE", DEFAULT_JUDGE_API_BASE))
-    parser.add_argument("--judge-api-key", default=env_or_default("ATOMMEM_JUDGE_API_KEY", config.API_KEY))
-    parser.add_argument("--judge-max-retries", type=int, default=3)
-    parser.add_argument("--judge-retry-sleep", type=float, default=2.0)
-    parser.add_argument("--profile-top-k", type=int, default=config.PROFILE_TEMPORAL_TOP_K)
-    parser.add_argument("--min-profile-llm-score", type=float, default=config.PROFILE_TEMPORAL_MIN_LLM_SCORE)
     return parser.parse_args()
 
 
@@ -605,7 +847,7 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     data_dir = Path(args.data_dir).resolve()
     facts_dir = Path(args.facts_dir).resolve()
-    categories = parse_categories(args)
+    categories = set(args.categories)
     conv_ids = parse_conv_ids(args.conv_ids)
 
     cases = discover_cases(
@@ -613,8 +855,9 @@ def main() -> None:
         data_dir=data_dir,
         conv_ids=conv_ids,
         categories=categories,
-        limit_per_conv=args.limit_per_conv,
     )
+    judge_model = env_or_default("ATOMMEM_JUDGE_MODEL", DEFAULT_JUDGE_MODEL)
+    settings = build_settings(args, data_dir, facts_dir, categories, cases, judge_model)
 
     print("=" * 72)
     print("AtomMem LoCoMo Evaluation")
@@ -629,63 +872,56 @@ def main() -> None:
     pipeline = load_pipeline_components()
     pipeline["configure_runtime_paths"](str(output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
-    predictions_path = output_dir / "locomo_eval_predictions.jsonl"
-    if predictions_path.exists() and not args.reuse_memory:
-        predictions_path.unlink()
+    checkpoint = load_checkpoint(output_dir, settings)
+    checkpoint["settings"] = settings
+    checkpoint["records"] = dedupe_records(checkpoint.get("records", []))
+    if checkpoint["records"]:
+        print(
+            f"Resuming checkpoint: {len(checkpoint['records'])} QA records, "
+            f"{checkpoint['token_usage'].get('total_tokens', 0):,} accumulated tokens"
+        )
+        print()
 
     total_start = time.time()
     judge: Optional[LLMJudge] = None
     if not args.skip_judge:
         judge = LLMJudge(
-            prompt_file=Path(args.judge_prompt_file).resolve(),
-            api_key=args.judge_api_key,
-            api_base=args.judge_api_base,
-            model=args.judge_model,
-            max_retries=args.judge_max_retries,
-            retry_sleep=args.judge_retry_sleep,
+            prompt_file=REPO_ROOT / "prompts" / "judge_prompt.txt",
+            api_key=env_or_default("ATOMMEM_JUDGE_API_KEY", config.API_KEY),
+            api_base=env_or_default("ATOMMEM_JUDGE_API_BASE", DEFAULT_JUDGE_API_BASE),
+            model=judge_model,
+            max_retries=3,
+            retry_sleep=2.0,
         )
-    all_records: List[Dict[str, Any]] = []
-    aggregate_token_stats: Dict[str, Any] = {
-        "calls": 0,
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens_k": 0.0,
+    all_records: List[Dict[str, Any]] = checkpoint["records"]
+    aggregate_token_stats: Dict[str, Any] = normalize_token_stats(checkpoint.get("token_usage"))
+    judge_token_stats: Dict[str, Any] = normalize_token_stats(checkpoint.get("judge_token_usage"))
+    per_case_token_stats: Dict[str, Any] = {
+        str(conv_id): normalize_token_stats(stats)
+        for conv_id, stats in checkpoint.get("token_usage_by_conversation", {}).items()
+        if isinstance(stats, dict)
     }
-    judge_token_stats: Dict[str, Any] = {
-        "calls": 0,
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens_k": 0.0,
-    }
-    per_case_token_stats: Dict[str, Any] = {}
+    checkpoint["token_usage"] = aggregate_token_stats
+    checkpoint["judge_token_usage"] = judge_token_stats
+    checkpoint["token_usage_by_conversation"] = per_case_token_stats
 
     for case in cases:
-        records, token_stats = run_case(
+        run_case(
             case,
             args,
             aggregate_token_stats,
             pipeline,
             judge,
             judge_token_stats,
+            per_case_token_stats,
+            checkpoint,
         )
-        all_records.extend(records)
-        per_case_token_stats[case["conv_id"]] = token_stats
 
+    all_records = dedupe_records(checkpoint["records"])
+    checkpoint["records"] = all_records
     summary = summarize_records(all_records)
     payload = {
-        "settings": {
-            "data_dir": str(data_dir),
-            "facts_dir": str(facts_dir),
-            "output_dir": str(output_dir),
-            "categories": sorted(categories),
-            "retrieval_k": RETRIEVAL_K,
-            "graph_enabled": not args.disable_graph,
-            "evidence_summary_enabled": not args.disable_evidence_summary,
-            "judge_enabled": not args.skip_judge,
-            "judge_model": None if args.skip_judge else args.judge_model,
-        },
+        "settings": settings,
         "runtime_seconds": time.time() - total_start,
         "summary": summary,
         "token_usage": aggregate_token_stats,
@@ -694,18 +930,15 @@ def main() -> None:
         "results": all_records,
     }
     save_json(output_dir / "locomo_eval_results.json", payload)
-    save_json(output_dir / "locomo_eval_summary.json", {
-        "settings": payload["settings"],
-        "runtime_seconds": payload["runtime_seconds"],
-        "summary": summary,
-        "token_usage": aggregate_token_stats,
-        "judge_token_usage": judge_token_stats,
-    })
     write_report(output_dir / "locomo_eval_report.md", summary, aggregate_token_stats)
+    checkpoint["completed"] = True
+    checkpoint["token_usage"] = aggregate_token_stats
+    checkpoint["judge_token_usage"] = judge_token_stats
+    checkpoint["token_usage_by_conversation"] = per_case_token_stats
+    save_checkpoint(output_dir, checkpoint)
 
     print("\nEvaluation complete.")
     print(f"Results: {output_dir / 'locomo_eval_results.json'}")
-    print(f"Summary: {output_dir / 'locomo_eval_summary.json'}")
     print(f"Report:  {output_dir / 'locomo_eval_report.md'}")
     pipeline["print_token_report"](aggregate_token_stats)
 
