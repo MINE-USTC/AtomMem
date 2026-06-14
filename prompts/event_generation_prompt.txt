@@ -9,13 +9,9 @@ Instructions:
    - 1-2 sentences maximum
 
 3. Extract keywords that: 
-   - Focus on the most important topics/entities/fields... (extract as completely as possible; no more than 5, fewer is OK) 
-   - Do NOT include speakers' name, "user" or "assistant" as keywords 
-   - For ordinary concepts, prefer one canonical singular noun instead of a phrase 
-    * Good: "career"; Bad: "career options", "Caroline career" 
-   - Preserve a multi-word keyword only when it is a proper names, title, location, or fixed phrase, etc 
-    * Good: "New York", "Charlotte's Web" 
-   - Extract nouns in their singular form whenever possible; hyphenated nouns such as "self-expression" are acceptable.
+   - Focus on the most important topics/entities/fields... (no more than 5) 
+   - Use noun form in their singular when possible
+   - Avoid redundancy
 
 4. If updating an existing event:
    - Integrate new information naturally (if there is no new information, it is OK not to make changes)

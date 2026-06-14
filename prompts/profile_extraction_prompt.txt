@@ -10,13 +10,7 @@ Instructions:
    - Written in third person (e.g., "Caroline is...", "Bob's hometown is...")
    - Focused on stable and long-term attributes, not temporary states or specific events
 4. For each statement:
-   - Focus on the most important topics/entities/fields... (extract as completely as possible; no more than 5, fewer is OK) 
-   - Do NOT include speakers' name, "user" or "assistant" as keywords 
-   - For ordinary concepts, prefer one canonical singular noun instead of a phrase 
-    * Good: "career"; Bad: "career options", "Caroline career" 
-   - Preserve a multi-word keyword only when it is a proper names, title, location, or fixed phrase, etc 
-    * Good: "New York", "Charlotte's Web" 
-   - Extract nouns in their singular form whenever possible; hyphenated nouns such as "self-expression" are acceptable.
+   - Generate relevant keywords (3-5 keywords, including the most important topics/topics/fields...) for each configuration file. Suggested keywords should be selected from a broader category of keywords, for example, for 'Nate enjoyed shooter game.', the keyword should be set as' game 'instead of' shooter game '. This can facilitate the search and speculation of users' preferences, such as inferring which types of games Nate may like.
    - Specify which fact IDs serve as evidence
 
 Guidelines:
